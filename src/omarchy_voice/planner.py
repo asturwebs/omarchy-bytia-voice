@@ -14,7 +14,10 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
+from pathlib import Path
 from urllib.parse import urlsplit
+
+from . import config as _config
 
 from . import capabilities
 from .config import Config
@@ -65,6 +68,40 @@ class PlannerUnavailable(RuntimeError):
     """Something the one-shot planner needs is missing."""
 
 
+def _history_path() -> Path:
+    return _config.STATE_DIR / "planner-history.json"
+
+
+def _history_load(limit: int) -> list[dict]:
+    """Last `limit` turns of conversational memory (oldest first)."""
+    if limit <= 0:
+        return []
+    try:
+        data = json.loads(_history_path().read_text())
+        turns = [t for t in data if t.get("user") and t.get("reply")]
+        return turns[-limit:]
+    except Exception:
+        return []
+
+
+def _history_append(user: str, reply: str) -> None:
+    """Persist one completed turn. Failures must never break a voice turn."""
+    try:
+        path = _history_path()
+        try:
+            data = json.loads(path.read_text())
+        except Exception:
+            data = []
+        data.append({
+            "user": user[-500:],
+            "reply": reply[-1000:],
+            "ts": int(time.time()),
+        })
+        path.write_text(json.dumps(data[-12:], ensure_ascii=False, indent=1))
+    except Exception:
+        pass
+
+
 class Planner:
     def __init__(self, config: Config, executor: Executor):
         self.config = config
@@ -82,6 +119,10 @@ class Planner:
             turn.error = f"{type(exc).__name__}: {exc}"
             turn.reply = "Something went wrong with that."
         turn.elapsed = time.monotonic() - started
+        # Conversational memory: only successful, non-dry-run turns persist.
+        if (turn.reply and not turn.error
+                and not getattr(self.config, "dry_run", False)):
+            _history_append(text, turn.reply)
         return turn
 
     def _loop(self, text: str, turn: Turn) -> str:
@@ -93,8 +134,14 @@ class Planner:
 
         messages: list[dict] = [
             {"role": "system", "content": _system_prompt(self.config)},
-            {"role": "user", "content": text},
         ]
+        # Conversational memory: replay recent turns so follow-ups like
+        # "ciérralo" or "¿cómo me llamo?" have a referent.
+        if not getattr(self.config, "dry_run", False):
+            for prev in _history_load(self.config.history_turns):
+                messages.append({"role": "user", "content": prev["user"]})
+                messages.append({"role": "assistant", "content": prev["reply"]})
+        messages.append({"role": "user", "content": text})
         tools = to_chat_tools(tools_for(self.config))
         reply = ""
 

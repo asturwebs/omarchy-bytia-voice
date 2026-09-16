@@ -138,6 +138,11 @@ class Config:
     # Extra JSON merged into every planner request body, for vendor options
     # that have no first-class key here (e.g. Z.ai GLM "thinking" controls).
     extra_body: dict = field(default_factory=dict)
+    # Conversational memory for the one-shot planner: how many past turns
+    # (user text + final reply) are replayed into each new request, so the
+    # assistant remembers what it just did ("ciérralo" needs it). 0 keeps
+    # upstream behaviour: every `say` is a fresh world. Stored in STATE_DIR.
+    history_turns: int = 6
     # Tool rounds allowed on one spoken instruction before the assistant has to
     # be asked again. A goal worked properly is a loop — act, wait, look, act —
     # so 8 ran out halfway through anything with three steps in it and the user
