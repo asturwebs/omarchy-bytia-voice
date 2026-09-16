@@ -1,5 +1,13 @@
 # omarchy-voice
 
+> **BytIA fork** (`asturwebs/omarchy-bytia-voice`) — a Spanish-language, BytIA-branded
+> build for our own desktop. Changes versus upstream: the planner accepts any
+> OpenAI-compatible Chat Completions endpoint (`[openai] base_url` + `extra_body`
+> in `config.toml` — we run Z.ai GLM) and the voice persona speaks Spanish as
+> **BytIA**. Everything else — architecture, tools, policy gate, docs — is upstream
+> work, credited here in full. Same MIT license; all upstream credit belongs to
+> [wombatoperator/omarchy-voice](https://github.com/wombatoperator/omarchy-voice).
+
 Voice control for the Omarchy desktop. Ask OMA to move windows, open applications,
 read a page, or manage a background task. OpenAI handles speech and planning;
 local tools carry out desktop actions through a policy gate.
