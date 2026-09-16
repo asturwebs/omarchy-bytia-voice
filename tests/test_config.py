@@ -71,5 +71,35 @@ class ConfigLoadTests(unittest.TestCase):
         self.assertIn(DEFAULT_DENY[0], loaded.deny_patterns)
 
 
+class PlannerEndpointConfigTests(unittest.TestCase):
+    """[openai] base_url + extra_body — endpoints OpenAI-compatible (Z.ai, local)."""
+
+    def write(self, text: str) -> Path:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        path = Path(self.tmp.name) / "config.toml"
+        path.write_text(text)
+        return path
+
+    def test_base_url_and_extra_body_parse_from_openai_section(self):
+        path = self.write(
+            '[openai]\n'
+            'planner_model = "glm-5.3-flash"\n'
+            'base_url = "https://api.z.ai/api/paas/v4"\n'
+            'api_key_env = "ZAI_API_KEY"\n'
+            'extra_body = { thinking = { type = "disabled" } }\n'
+        )
+        loaded = cfg.load(path)
+        self.assertEqual(loaded.base_url, "https://api.z.ai/api/paas/v4")
+        self.assertEqual(loaded.api_key_env, "ZAI_API_KEY")
+        self.assertEqual(loaded.extra_body, {"thinking": {"type": "disabled"}})
+
+    def test_base_url_defaults_to_openai(self):
+        path = self.write('[openai]\nplanner_model = "gpt-4.1"\n')
+        loaded = cfg.load(path)
+        self.assertEqual(loaded.base_url, "https://api.openai.com/v1")
+        self.assertEqual(loaded.extra_body, {})
+
+
 if __name__ == "__main__":
     unittest.main()

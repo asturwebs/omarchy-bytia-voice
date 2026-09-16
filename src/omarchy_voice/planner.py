@@ -14,13 +14,14 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
+from urllib.parse import urlsplit
 
 from . import capabilities
 from .config import Config
 from .persona import PERSONA
 from .tools import TOOL_SCHEMAS, Executor, tools_for
 
-CHAT_URL = "https://api.openai.com/v1/chat/completions"
+DEFAULT_CHAT_BASE = "https://api.openai.com/v1"
 
 
 @dataclass
@@ -142,15 +143,34 @@ class Planner:
         return reply or "Ran out of steps on that one."
 
 
+def _chat_base(config: Config) -> str:
+    """Validated planner endpoint: HTTPS, or plain HTTP on loopback only.
+
+    Same policy as vision.base_url — the value comes from the user's own
+    config file (chmod 600), but we still refuse anything that could turn
+    the request into a credentialed or non-loopback plain-HTTP call.
+    """
+    base = (getattr(config, "base_url", "") or DEFAULT_CHAT_BASE).strip().rstrip("/")
+    url = urlsplit(base)
+    if url.scheme not in ("https", "http"):
+        raise PlannerUnavailable("planner base_url must use https (or http on loopback)")
+    if url.scheme == "http" and url.hostname not in ("127.0.0.1", "localhost", "::1"):
+        raise PlannerUnavailable("plain http is only allowed on loopback")
+    if url.username or url.password or url.query or url.fragment:
+        raise PlannerUnavailable("planner base_url must not embed credentials, query or fragment")
+    return base
+
+
 def _chat(messages: list[dict], tools: list[dict], config: Config, key: str) -> dict:
     body = json.dumps({
         "model": config.planner_model,
         "messages": messages,
         "tools": tools,
         "tool_choice": "auto",
+        **(getattr(config, "extra_body", None) or {}),
     }).encode()
     request = urllib.request.Request(
-        CHAT_URL,
+        _chat_base(config) + "/chat/completions",
         data=body,
         headers={
             "Authorization": f"Bearer {key}",
@@ -163,6 +183,6 @@ def _chat(messages: list[dict], tools: list[dict], config: Config, key: str) -> 
             return json.loads(response.read())
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode()[:400]
-        raise PlannerUnavailable(f"OpenAI HTTP {exc.code}: {detail}") from exc
+        raise PlannerUnavailable(f"planner HTTP {exc.code}: {detail}") from exc
     except urllib.error.URLError as exc:
-        raise PlannerUnavailable(f"could not reach OpenAI: {exc.reason}") from exc
+        raise PlannerUnavailable(f"could not reach planner endpoint: {exc.reason}") from exc

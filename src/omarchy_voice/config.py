@@ -132,6 +132,12 @@ class Config:
     # --- openai ------------------------------------------------------------
     planner_model: str = "gpt-4.1"
     api_key_env: str = "OPENAI_API_KEY"
+    # Any OpenAI-compatible Chat Completions endpoint works — Z.ai, a local
+    # llama.cpp or Ollama — as long as it honours tools. Loopback HTTP allowed.
+    base_url: str = "https://api.openai.com/v1"
+    # Extra JSON merged into every planner request body, for vendor options
+    # that have no first-class key here (e.g. Z.ai GLM "thinking" controls).
+    extra_body: dict = field(default_factory=dict)
     # Tool rounds allowed on one spoken instruction before the assistant has to
     # be asked again. A goal worked properly is a loop — act, wait, look, act —
     # so 8 ran out halfway through anything with three steps in it and the user
