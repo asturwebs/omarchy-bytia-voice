@@ -35,7 +35,13 @@ def cmd_say(args, config) -> int:
     executor = Executor(config)
     planner = Planner(config, executor)
     print(f'{_bold("heard")}   {text}')
-    turn = planner.think(text)
+
+    def _emit_phrase(sentence: str) -> None:
+        # Streaming: each completed sentence goes out as it is produced so a
+        # voice front-end can start speaking before the model finishes.
+        print(f"reply-chunk\t{sentence}", flush=True)
+
+    turn = planner.think(text, on_phrase=_emit_phrase)
     for action in turn.actions:
         print(f'{_bold("action")}  {action}')
     if turn.error:

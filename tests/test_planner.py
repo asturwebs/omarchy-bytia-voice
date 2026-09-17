@@ -8,7 +8,88 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from omarchy_voice.config import Config
 from omarchy_voice import planner
-from omarchy_voice.planner import PlannerUnavailable, _chat_base
+from omarchy_voice.planner import PlannerUnavailable, _chat_base, _split_phrases
+
+
+class PhraseSplitTests(unittest.TestCase):
+    """Streaming speech: only whole sentences are emitted, decimals survive."""
+
+    def test_decimal_point_does_not_split(self):
+        self.assertEqual(_split_phrases("son 3.5 euros"), ([], "son 3.5 euros"))
+
+    def test_complete_sentence_with_trailing_space(self):
+        self.assertEqual(_split_phrases("Hola, Socio. "), (["Hola, Socio."], ""))
+
+    def test_last_sentence_without_space_stays_pending(self):
+        self.assertEqual(_split_phrases("Uno. Dos"), (["Uno."], "Dos"))
+
+    def test_multiple_boundaries(self):
+        self.assertEqual(_split_phrases("Uno. ¿Dos? ¡Tres! "),
+                         (["Uno.", "¿Dos?", "¡Tres!"], ""))
+
+    def test_closing_quote_rides_with_sentence(self):
+        phrases, rest = _split_phrases(
+            '"El mar no tiene secretos." / "Cada ola llega." / y se va.')
+        self.assertEqual(
+            phrases, ['"El mar no tiene secretos."', '/ "Cada ola llega."'])
+        self.assertEqual(rest, "/ y se va.")
+
+    def test_empty_buffer(self):
+        self.assertEqual(_split_phrases(""), ([], ""))
+
+
+class StreamAssemblyTests(unittest.TestCase):
+    """SSE reassembly: content→phrases, tool_call deltas→one message."""
+
+    def _run_stream(self, sse_lines):
+        import io
+        from unittest import mock
+        phrases = []
+        config = Config(base_url="https://api.z.ai/api/paas/v4")
+        fake = io.BytesIO(b"\n".join(line.encode() for line in sse_lines))
+        with mock.patch.object(planner.urllib.request, "urlopen", return_value=fake):
+            data = planner._chat_streamed(
+                [{"role": "user", "content": "x"}], [], config, "k",
+                phrases.append)
+        return data, phrases
+
+    def test_content_streams_as_phrases(self):
+        data, phrases = self._run_stream([
+            'data: {"choices":[{"delta":{"content":"Uno. "}}]}',
+            'data: {"choices":[{"delta":{"content":"Dos."}}]}',
+            'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+            'data: {"usage":{"prompt_tokens":5,"completion_tokens":9}}',
+            'data: [DONE]',
+        ])
+        self.assertEqual(phrases, ["Uno.", "Dos."])
+        self.assertEqual(data["choices"][0]["message"]["content"], "Uno. Dos.")
+        self.assertEqual(data["usage"]["prompt_tokens"], 5)
+
+    def test_tool_call_deltas_are_reassembled(self):
+        data, phrases = self._run_stream([
+            'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1",'
+            '"function":{"name":"omarchy","arguments":""}}]}}]}',
+            'data: {"choices":[{"delta":{"tool_calls":[{"index":0,'
+            '"function":{"arguments":"{\\"a\\""}}]}}]}',
+            'data: {"choices":[{"delta":{"tool_calls":[{"index":0,'
+            '"function":{"arguments":": 1}"}}]}}]}',
+            'data: [DONE]',
+        ])
+        self.assertEqual(phrases, [])
+        calls = data["choices"][0]["message"]["tool_calls"]
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["id"], "c1")
+        self.assertEqual(calls[0]["function"]["name"], "omarchy")
+        self.assertEqual(calls[0]["function"]["arguments"], '{"a": 1}')
+
+    def test_mid_stream_json_noise_is_tolerated(self):
+        data, phrases = self._run_stream([
+            ': keep-alive comment',
+            'data: not-json',
+            'data: {"choices":[{"delta":{"content":"Frase. "}}]}',
+            'data: [DONE]',
+        ])
+        self.assertEqual(phrases, ["Frase."])
 
 
 class HistoryTests(unittest.TestCase):
