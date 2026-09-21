@@ -152,6 +152,16 @@ class Config:
     # Keep Realtime available while the Live transport is evaluated.
     engine: str = "realtime"
 
+    # --- jeval router ------------------------------------------------------
+    # Cheap typed triage (TypeSafe Jev) before the full planner loop. Both
+    # keys are flat TOML root keys. off never runs; shadow classifies
+    # fire-and-forget for the log only (zero added latency, the loop always
+    # runs); local classifies in-line and serves trivial conversation ("hola",
+    # "gracias") with a fixed short reply when is_trivial >= router_threshold.
+    # Needs TYPESAFE_API_KEY; any router failure fails open.
+    router_mode: str = "off"
+    router_threshold: float = 0.7
+
     network_enabled: bool = True
     network_interval_seconds: float = 20.0
     network_timeout_seconds: float = 5.0

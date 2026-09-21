@@ -21,6 +21,7 @@ from urllib.parse import urlsplit
 from . import config as _config
 
 from . import capabilities
+from . import jeval
 from .config import Config
 from .persona import PERSONA
 from .tools import TOOL_SCHEMAS, Executor, tools_for
@@ -111,6 +112,17 @@ class Planner:
     def think(self, text: str, on_phrase: "callable | None" = None) -> Turn:
         turn = Turn(text=text)
         started = time.monotonic()
+        # JEVAL router triage at the door. Fire-and-forget in shadow mode
+        # (log only, zero added latency); in local mode a trivial
+        # conversational turn is served here without the full loop.
+        try:
+            shortcut = self._router(text)
+        except Exception:  # the router is never load-bearing: fail open
+            shortcut = ""
+        if shortcut:
+            turn.reply = shortcut
+            turn.elapsed = time.monotonic() - started
+            return turn
         try:
             turn.reply = self._loop(text, turn, on_phrase)
         except PlannerUnavailable as exc:
@@ -125,6 +137,21 @@ class Planner:
                 and not getattr(self.config, "dry_run", False)):
             _history_append(text, turn.reply)
         return turn
+
+    def _router(self, text: str) -> str:
+        """JEVAL triage at think() entry. Returns a reply or "" (run the loop)."""
+        mode = (getattr(self.config, "router_mode", "off") or "off").strip()
+        if mode == "shadow":
+            jeval.launch_background(text, mode="shadow")
+            return ""
+        if mode != "local":
+            return ""
+        verdict = jeval.classify(text, mode="local")
+        trivial = float(verdict.get("noul_trivial") or 0.0)
+        threshold = float(getattr(self.config, "router_threshold", 0.7))
+        if verdict.get("intent") == "conversation" and trivial >= threshold:
+            return "¡Aquí BytIA! Dime cuando quieras."
+        return ""
 
     def _loop(self, text: str, turn: Turn, on_phrase=None) -> str:
         key = os.environ.get(self.config.api_key_env, "")
