@@ -236,12 +236,43 @@ def _chat_base(config: Config) -> str:
     return base
 
 
+_loaded_model_cache: tuple[float, str | None] = (0.0, None)
+
+
+def _resolve_model(config: Config, key: str) -> str:
+    """Modelo dinámico para servidores locales (Unsloth): si hay UN modelo
+    cargado, se usa ese — cambiar el modelo en Unsloth cambia BytIA Voice.
+    Si no hay ninguno cargado (o falla la consulta), usa `planner_model`
+    (el default: el servidor lo auto-carga). En la nube, siempre el fijo."""
+    fallback = config.planner_model
+    base = (getattr(config, "base_url", "") or "").strip().rstrip("/")
+    if urlsplit(base).hostname not in ("127.0.0.1", "localhost", "::1"):
+        return fallback
+    global _loaded_model_cache
+    ts, cached = _loaded_model_cache
+    if cached and time.time() - ts < 10:
+        return cached
+    picked = fallback
+    try:
+        req = urllib.request.Request(
+            base + "/models", headers={"Authorization": f"Bearer {key}"})
+        with urllib.request.urlopen(req, timeout=3) as response:
+            data = json.loads(response.read()).get("data", [])
+        loaded = [m.get("id") for m in data if m.get("loaded") and m.get("id")]
+        if len(loaded) == 1:
+            picked = loaded[0]
+    except Exception:
+        picked = fallback
+    _loaded_model_cache = (time.time(), picked)
+    return picked
+
+
 def _chat(messages: list[dict], tools: list[dict], config: Config, key: str,
           on_phrase=None) -> dict:
     if on_phrase is not None:
         return _chat_streamed(messages, tools, config, key, on_phrase)
     body = json.dumps({
-        "model": config.planner_model,
+        "model": _resolve_model(config, key),
         "messages": messages,
         "tools": tools,
         "tool_choice": "auto",
@@ -296,7 +327,7 @@ def _chat_streamed(messages: list[dict], tools: list[dict], config: Config,
     structure the non-streaming path produces.
     """
     body = json.dumps({
-        "model": config.planner_model,
+        "model": _resolve_model(config, key),
         "messages": messages,
         "tools": tools,
         "tool_choice": "auto",
