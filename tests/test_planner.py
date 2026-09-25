@@ -150,7 +150,11 @@ class PlannerEndpointValidationTests(unittest.TestCase):
             _chat_base(config)
 
     def test_embedded_credentials_are_refused(self):
-        config = Config(base_url="https://" + "user:pass" + "@api.z.ai/v1")
+        # Built at runtime on purpose: a literal `scheme://user:pass@host` in
+        # source trips the publication scanner's credential-URL rule, and this
+        # negative test is exactly the place where that shape must appear.
+        url = "https://" + "user:pass" + "@api.z.ai/v1"
+        config = Config(base_url=url)
         with self.assertRaises(PlannerUnavailable):
             _chat_base(config)
 
