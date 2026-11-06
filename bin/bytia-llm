@@ -1,0 +1,149 @@
+#!/usr/bin/env python3
+"""bytia-llm — conmutador de cerebro del planner de BytIA Voice (cloud ↔ local).
+
+Uso:
+  bytia-llm local [modelo]   # Unsloth local (127.0.0.1:8888) — sin modelo usa
+                             # unsloth/gemma-4-E4B-it-qat-GGUF; con modelo, ese
+                             # (ej: bytia-llm local unsloth/Qwen3.8-27B-GGUF)
+  bytia-llm ollama [modelo]  # Ollama local (127.0.0.1:11434) — sin modelo usa
+                             # mimo-planner:9b-q8; con modelo, ese
+                             # (ej: bytia-llm ollama qwen3.6:8b)
+  bytia-llm cloud            # Z.ai GLM-5.3-flash (nube, endpoint general/paas)
+
+El preset `ollama` sirve para CUALQUIER modelo de Ollama: `ollama pull` lo que
+sea y `bytia-llm ollama <modelo>`. Requiere OLLAMA_LOCAL_API_KEY en
+~/.config/omarchy-voice/env (dummy: el planner aborta con api_key_env vacía).
+  bytia-llm status           # ver qué hay activo
+
+Cambia planner_model / api_key_env / base_url en la sección [openai] de
+~/.config/omarchy-voice/config.toml y reinicia omarchy-voice.service.
+El extra_body (reasoning_effort = "low") vale para ambos: verificado que el
+gemma-4 lo respeta (reduce el thinking y acelera la respuesta).
+Backup del config original: config.toml.bak-pre-llm-switch.
+"""
+import re
+import shutil
+import subprocess
+import sys
+import os
+
+CONFIG = os.path.expanduser("~/.config/omarchy-voice/config.toml")
+BACKUP = CONFIG + ".bak-pre-llm-switch"
+
+PRESETS = {
+    "cloud": {
+        "planner_model": "glm-5.3-flash",
+        "api_key_env": "ZAI_API_KEY",
+        "base_url": "https://api.z.ai/api/paas/v4",
+    },
+    "local": {
+        "planner_model": "TwIL-8B-Q4_K_M-balanced",
+        "api_key_env": "UNSLOTH_LOCAL_API_KEY",
+        "base_url": "http://127.0.0.1:8888/v1",
+        "extra_body": '{ reasoning_effort = "none" }',
+    },
+    "ollama": {
+        "planner_model": "mimo-planner:9b-q8",
+        "api_key_env": "OLLAMA_LOCAL_API_KEY",
+        "base_url": "http://127.0.0.1:11434/v1",
+        # Ollama interpreta reasoning_effort="none" como apagar el thinking.
+        # Medido 2026-11-06: con "low" o sin el campo, mimo gasta el budget
+        # razonando (finish_reason=length, sin tool_calls) y el planner entra en
+        # bucle hasta agotar max_turns. Con "none": finish=tool_calls a la primera.
+        "extra_body": '{ reasoning_effort = "none" }',
+    },
+}
+
+# Host → preset. Se compara por puerto y no por igualdad exacta para que
+# `ollama <modelo>` y variantes de host no mientan en `status`.
+_HOSTS = {"127.0.0.1:8888": "local", "127.0.0.1:11434": "ollama"}
+
+
+def _openai_section(text: str) -> str:
+    """Solo la sección [openai]: el config tiene más base_url (p.ej. [vision])."""
+    for part in re.split(r"(?m)^(?=\[[^\]]+\]\s*$)", text):
+        if re.match(r"(?m)^\[openai\]\s*$", part):
+            return part
+    return ""
+
+
+def current_preset(text: str) -> str:
+    m = re.search(r'base_url\s*=\s*"([^"]+)"', _openai_section(text))
+    if not m:
+        return "cloud"
+    for host, name in _HOSTS.items():
+        if host in m.group(1):
+            return name
+    return "cloud"
+
+
+def patch_section(text: str, values: dict) -> str:
+    """Reescribe claves SOLO dentro de la sección [openai].
+
+    Los valores son cadenas y se entrecomillan, salvo los de _RAW (tablas
+    inline como extra_body), que se escriben literales.
+    """
+    _RAW = {"extra_body"}
+    parts = re.split(r"(?m)^(?=\[[^\]]+\]\s*$)", text)
+    out = []
+    for part in parts:
+        if re.match(r"(?m)^\[openai\]\s*$", part):
+            for key, val in values.items():
+                new_line = f"{key} = {val}" if key in _RAW else f'{key} = "{val}"'
+                if re.search(rf"(?m)^{key}\s*=", part):
+                    part = re.sub(rf"(?m)^{key}\s*=.*$", new_line, part, count=1)
+                else:
+                    part = part.rstrip("\n") + f"\n{new_line}\n"
+        out.append(part)
+    return "".join(out)
+
+
+def main():
+    args = sys.argv[1:]
+    if not args or args[0] not in ("local", "ollama", "cloud", "status") or len(args) > 2:
+        print(__doc__)
+        sys.exit(1)
+
+    text = open(CONFIG).read()
+    active = current_preset(text)
+
+    if args[0] == "status":
+        print(f"planner activo: {active}")
+        # Mostrar lo que hay REALMENTE en el config (no el preset por defecto:
+        # `local <modelo>` guarda un modelo distinto y antes el status mentía).
+        for k in ("planner_model", "api_key_env", "base_url", "extra_body"):
+            # extra_body es una tabla inline (sin comillas); el resto, cadenas.
+            pat = rf'(?m)^{k}\s*=\s*(.+?)\s*$' if k == "extra_body" else rf'(?m)^{k}\s*=\s*"([^"]+)"'
+            m = re.search(pat, text)
+            print(f"  {k} = {m.group(1) if m else '(no definido)'}")
+        r = subprocess.run(["systemctl", "--user", "is-active", "omarchy-voice"],
+                           capture_output=True, text=True)
+        print("  daemon:", r.stdout.strip())
+        sys.exit(0)
+
+    target = args[0]
+    values = dict(PRESETS[target])
+    if target in ("local", "ollama") and len(args) == 2:
+        values["planner_model"] = args[1]
+
+    if target == active and not (target in ("local", "ollama") and len(args) == 2):
+        print(f"ya estás en {target} — nada que hacer")
+    else:
+        if not os.path.exists(BACKUP):
+            shutil.copy(CONFIG, BACKUP)
+            print(f"backup: {BACKUP}")
+        new_text = patch_section(text, values)
+        open(CONFIG, "w").write(new_text)
+        print(f"config → {target} ({values['planner_model']})")
+
+    r = subprocess.run(["systemctl", "--user", "restart", "omarchy-voice"],
+                       capture_output=True, text=True)
+    if r.returncode == 0:
+        print("omarchy-voice reiniciado ✓")
+    else:
+        print("ERROR al reiniciar:", r.stderr.strip())
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

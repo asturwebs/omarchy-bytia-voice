@@ -69,7 +69,8 @@ class PlannerEndpointValidationTests(unittest.TestCase):
             _chat_base(config)
 
     def test_embedded_credentials_are_refused(self):
-        config = Config(base_url="https://api.z.ai/v1")
+        credenciales = "user:pass"
+        config = Config(base_url=f"https://{credenciales}@api.z.ai/v1")
         with self.assertRaises(PlannerUnavailable):
             _chat_base(config)
 
