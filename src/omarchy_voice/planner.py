@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 import urllib.error
 import urllib.request
@@ -20,6 +21,7 @@ from urllib.parse import urlsplit
 from . import config as _config
 
 from . import capabilities
+from . import jeval
 from .config import Config
 from .persona import PERSONA
 from .tools import TOOL_SCHEMAS, Executor, tools_for
@@ -107,11 +109,22 @@ class Planner:
         self.config = config
         self.executor = executor
 
-    def think(self, text: str) -> Turn:
+    def think(self, text: str, on_phrase: "callable | None" = None) -> Turn:
         turn = Turn(text=text)
         started = time.monotonic()
+        # JEVAL router triage at the door. Fire-and-forget in shadow mode
+        # (log only, zero added latency); in local mode a trivial
+        # conversational turn is served here without the full loop.
         try:
-            turn.reply = self._loop(text, turn)
+            shortcut = self._router(text)
+        except Exception:  # the router is never load-bearing: fail open
+            shortcut = ""
+        if shortcut:
+            turn.reply = shortcut
+            turn.elapsed = time.monotonic() - started
+            return turn
+        try:
+            turn.reply = self._loop(text, turn, on_phrase)
         except PlannerUnavailable as exc:
             turn.error = str(exc)
             turn.reply = "My planner isn't configured yet."
@@ -125,7 +138,22 @@ class Planner:
             _history_append(text, turn.reply)
         return turn
 
-    def _loop(self, text: str, turn: Turn) -> str:
+    def _router(self, text: str) -> str:
+        """JEVAL triage at think() entry. Returns a reply or "" (run the loop)."""
+        mode = (getattr(self.config, "router_mode", "off") or "off").strip()
+        if mode == "shadow":
+            jeval.launch_background(text, mode="shadow")
+            return ""
+        if mode != "local":
+            return ""
+        verdict = jeval.classify(text, mode="local")
+        trivial = float(verdict.get("noul_trivial") or 0.0)
+        threshold = float(getattr(self.config, "router_threshold", 0.7))
+        if verdict.get("intent") == "conversation" and trivial >= threshold:
+            return "¡Aquí BytIA! Dime cuando quieras."
+        return ""
+
+    def _loop(self, text: str, turn: Turn, on_phrase=None) -> str:
         key = os.environ.get(self.config.api_key_env, "")
         if not key:
             raise PlannerUnavailable(
@@ -146,7 +174,7 @@ class Planner:
         reply = ""
 
         for _ in range(self.config.max_turns):
-            data = _chat(messages, tools, self.config, key)
+            data = _chat(messages, tools, self.config, key, on_phrase=on_phrase)
             usage = data.get("usage") or {}
             if usage:
                 turn.tokens = {
@@ -208,9 +236,43 @@ def _chat_base(config: Config) -> str:
     return base
 
 
-def _chat(messages: list[dict], tools: list[dict], config: Config, key: str) -> dict:
+_loaded_model_cache: tuple[float, str | None] = (0.0, None)
+
+
+def _resolve_model(config: Config, key: str) -> str:
+    """Modelo dinámico para servidores locales (Unsloth): si hay UN modelo
+    cargado, se usa ese — cambiar el modelo en Unsloth cambia BytIA Voice.
+    Si no hay ninguno cargado (o falla la consulta), usa `planner_model`
+    (el default: el servidor lo auto-carga). En la nube, siempre el fijo."""
+    fallback = config.planner_model
+    base = (getattr(config, "base_url", "") or "").strip().rstrip("/")
+    if urlsplit(base).hostname not in ("127.0.0.1", "localhost", "::1"):
+        return fallback
+    global _loaded_model_cache
+    ts, cached = _loaded_model_cache
+    if cached and time.time() - ts < 10:
+        return cached
+    picked = fallback
+    try:
+        req = urllib.request.Request(
+            base + "/models", headers={"Authorization": f"Bearer {key}"})
+        with urllib.request.urlopen(req, timeout=3) as response:
+            data = json.loads(response.read()).get("data", [])
+        loaded = [m.get("id") for m in data if m.get("loaded") and m.get("id")]
+        if len(loaded) == 1:
+            picked = loaded[0]
+    except Exception:
+        picked = fallback
+    _loaded_model_cache = (time.time(), picked)
+    return picked
+
+
+def _chat(messages: list[dict], tools: list[dict], config: Config, key: str,
+          on_phrase=None) -> dict:
+    if on_phrase is not None:
+        return _chat_streamed(messages, tools, config, key, on_phrase)
     body = json.dumps({
-        "model": config.planner_model,
+        "model": _resolve_model(config, key),
         "messages": messages,
         "tools": tools,
         "tool_choice": "auto",
@@ -233,3 +295,122 @@ def _chat(messages: list[dict], tools: list[dict], config: Config, key: str) -> 
         raise PlannerUnavailable(f"planner HTTP {exc.code}: {detail}") from exc
     except urllib.error.URLError as exc:
         raise PlannerUnavailable(f"could not reach planner endpoint: {exc.reason}") from exc
+
+
+# Sentence boundaries for speech: a chunk is only spoken once it is a whole
+# sentence. A period alone is not enough (it may be a decimal "3.5"), so the
+# boundary requires trailing whitespace or end-of-stream. Closing quotes and
+# brackets ride along with the sentence ("…profundidades." / "Cada…").
+_PHRASE_BOUNDARY = re.compile(r"([\.\!\?\…]+[\)\"''»…]*[ \t\n]+)")
+
+
+def _split_phrases(buffer: str) -> tuple[list[str], str]:
+    """Split `buffer` into complete sentences + the trailing remainder."""
+    if not buffer:
+        return [], ""
+    pieces: list[str] = []
+    last = 0
+    for match in _PHRASE_BOUNDARY.finditer(buffer):
+        pieces.append(buffer[last:match.end()].rstrip())
+        last = match.end()
+    return pieces, buffer[last:]
+
+
+def _chat_streamed(messages: list[dict], tools: list[dict], config: Config,
+                   key: str, on_phrase) -> dict:
+    """Chat Completions with SSE streaming.
+
+    Behaves like `_chat` (same return shape) but emits each completed
+    sentence of the reply through `on_phrase(sentence)` as it arrives, so a
+    voice front-end can start speaking before the model finishes.
+    Tool-call deltas are reassembled into the same `message.tool_calls`
+    structure the non-streaming path produces.
+    """
+    body = json.dumps({
+        "model": _resolve_model(config, key),
+        "messages": messages,
+        "tools": tools,
+        "tool_choice": "auto",
+        "stream": True,
+        "stream_options": {"include_usage": True},
+        **(getattr(config, "extra_body", None) or {}),
+    }).encode()
+    request = urllib.request.Request(
+        _chat_base(config) + "/chat/completions",
+        data=body,
+        headers={
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+        },
+        method="POST",
+    )
+
+    content_parts: list[str] = []
+    tool_calls: dict[int, dict] = {}
+    usage: dict = {}
+
+    def _flush(pending: str) -> str:
+        sentences, remainder = _split_phrases(pending)
+        for sentence in sentences:
+            sentence = sentence.strip()
+            if sentence:
+                try:
+                    on_phrase(sentence)
+                except Exception:
+                    pass  # a voice front-end hiccup must not kill the turn
+        return remainder
+
+    pending = ""
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            for raw_line in response:
+                line = raw_line.decode("utf-8", errors="replace").strip()
+                if not line or not line.startswith("data:"):
+                    continue
+                payload = line[len("data:"):].strip()
+                if payload == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(payload)
+                except json.JSONDecodeError:
+                    continue
+                if chunk.get("usage"):
+                    usage = chunk["usage"]
+                choice = (chunk.get("choices") or [{}])[0]
+                delta = choice.get("delta") or {}
+                piece = delta.get("content")
+                if piece:
+                    content_parts.append(piece)
+                    pending = _flush(pending + piece)
+                for call in delta.get("tool_calls") or []:
+                    index = call.get("index", 0)
+                    slot = tool_calls.setdefault(index, {
+                        "id": "", "type": "function",
+                        "function": {"name": "", "arguments": ""},
+                    })
+                    if call.get("id"):
+                        slot["id"] = call["id"]
+                    fn = call.get("function") or {}
+                    if fn.get("name"):
+                        slot["function"]["name"] += fn["name"]
+                    if fn.get("arguments"):
+                        slot["function"]["arguments"] += fn["arguments"]
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode()[:400]
+        raise PlannerUnavailable(f"planner HTTP {exc.code}: {detail}") from exc
+    except urllib.error.URLError as exc:
+        raise PlannerUnavailable(f"could not reach planner endpoint: {exc.reason}") from exc
+
+    # Whatever is left when the stream ends is the last sentence.
+    tail = pending.strip()
+    if tail:
+        try:
+            on_phrase(tail)
+        except Exception:
+            pass
+
+    message: dict = {"content": "".join(content_parts)}
+    if tool_calls:
+        message["tool_calls"] = [tool_calls[i] for i in sorted(tool_calls)]
+    return {"choices": [{"message": message}], "usage": usage}

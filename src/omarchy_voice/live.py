@@ -256,8 +256,8 @@ class LiveSession:
             self._history, self._operations = [], []
 
     def _trim_history(self):
-        self._history = self._history[-60:]
-        while self._history and sum(len(x["text"].encode()) for x in self._history) > 8000:
+        self._history = self._history[-400:]
+        while self._history and sum(len(x["text"].encode()) for x in self._history) > 100000:
             self._history.pop(0)
 
     def _save_state(self, payload=None):

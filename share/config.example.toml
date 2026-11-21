@@ -2,6 +2,15 @@
 # Every key is optional. Active values below match Config defaults.
 # Commented device, root, command, and policy entries illustrate overrides.
 
+# JEVAL router: cheap typed triage (TypeSafe Jev) before the full planner
+# loop. Flat root keys; needs TYPESAFE_API_KEY in the environment (or
+# ~/.config/typesafe/env). off never runs. shadow classifies fire-and-forget
+# and only logs (~/.local/state/jev-router/voice.jsonl). local serves trivial
+# conversation (greeting, thanks, goodbye) with a fixed short reply when the
+# is_trivial noul score reaches the threshold; any router failure fails open.
+router_mode = "off"       # off | shadow | local
+router_threshold = 0.7
+
 [openai]
 # Used by `omarchy-voice say` (typed, no microphone). The daemon itself talks
 # to the selected voice API; this is the Chat Completions model for one-shot plans.
