@@ -285,7 +285,7 @@ ESSENTIALS = [
     # launch had failed. Advertising the route was teaching the mistake.
     ("Open the browser (no URL — see below)", "omarchy launch browser"),
     ("Open the editor",            "omarchy launch editor"),
-    ("Open the file manager",      "omarchy launch nautilus"),
+    ("Open the file manager",      "omarchy launch files"),
     ("Open a web app, or focus it if already open",
                                    "omarchy launch or focus webapp <window-pattern> <url>"),
     ("Open any app, or focus it if already open",

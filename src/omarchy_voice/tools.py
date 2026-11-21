@@ -1355,7 +1355,7 @@ class Executor:
             if isinstance(app, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*(?::[A-Za-z0-9_.-]+)?", app):
                 return ("launch", app.split(":", 1)[0].removesuffix(".desktop"))
         if name == "omarchy_cli" and args.get("command") in (
-                "launch terminal", "launch browser", "launch editor", "launch nautilus"):
+                "launch terminal", "launch browser", "launch editor", "launch files"):
             return ("omarchy_launch", args["command"])
         if name == "hypr_dispatch" and isinstance(args.get("lua"), str):
             match = re.fullmatch(

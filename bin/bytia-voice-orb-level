@@ -1,0 +1,41 @@
+#!/usr/bin/env python3
+"""bytia-voice-orb-level — publica el nivel del micro para el VoiceOrb.
+
+Uso: bytia-voice-orb-level <fichero_level> [args pw-record...]
+Lee PCM s16 mono 16 kHz por stdin (pw-record) y escribe "<you> <oma>" (0..1)
+16 veces por segundo en <fichero_level> — el formato que espera el VoiceOrb
+del fork (plugin voice.orb). Termina cuando stdin se cierra o al matarlo.
+"""
+import sys, time, math, array
+
+out = sys.argv[1]
+BLOCK = 1024                      # muestras por bloque (~64 ms a 16 kHz)
+period = 0.0625                   # 16/s
+step = max(BLOCK, int(16000 * period))
+last = time.time()
+
+def write(v):
+    try:
+        with open(out + ".tmp", "w") as f:
+            f.write(f"{v:.3f} 0.000\n")
+        import os
+        os.replace(out + ".tmp", out)
+    except OSError:
+        pass
+
+buf = b""
+while True:
+    chunk = sys.stdin.buffer.read(BLOCK * 2)
+    if not chunk:
+        break
+    buf += chunk
+    if len(buf) >= step * 2:
+        a = array.array("h", buf[:step * 2])
+        rms = math.sqrt(sum(x * x for x in a) / len(a)) if a else 0.0
+        buf = b""
+        write(min(1.0, rms / 3000.0))
+        now = time.time()
+        if now - last < period:
+            time.sleep(period - (now - last))
+        last = time.time()
+write(0.0)

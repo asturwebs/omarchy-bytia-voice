@@ -39,3 +39,6 @@ docs/omarchy-voice.html
 build/
 dist/
 *.egg-info/
+*.bak
+*.bak-*
+*.bak.*

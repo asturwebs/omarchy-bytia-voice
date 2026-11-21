@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# bytia-tts — boca de BytIA Voice (v3: daemon caliente + fallback a binario)
+# Contrato OMA: wrapper que acepta `--` seguido del texto como último argumento.
+# v3 (25-sep-26): el modelo vive en RAM vía bytia-ttsd.service (~0.2s/frase en
+# vez de ~1s con arranque en frío). Si el daemon no está, cae al binario piper
+# como siempre — cero riesgo, misma salida PCM S16_LE mono 22050.
+set -euo pipefail
+[ "${1:-}" = "--" ] && shift
+[ $# -gt 0 ] || exit 0
+# Diccionario fonético: cómo se ESCRIBE → cómo debe SONAR (piper lee grafemas).
+# BytIA→"Bitia" (18-sep-26: probadas "Bitya"→"Bika", "Bit ya"→"Bytya"; el Socio
+# elige "Bitia"). BYTIA → BITIA conserva el tono.
+text=$(printf '%s' "$*" | sed -e 's/BytIA/Bitia/g' -e 's/Bytia/Bitia/g' -e 's/BYTIA/BITIA/g')
+SOCK="$HOME/.local/state/bytia-ttsd.sock"
+
+# Salida: cliente NATIVO de PipeWire (pw-cat), no pipewire-alsa. `aplay`
+# contra el sink Bluetooth se quedaba bloqueado en futex_wait sin consumir
+# (bug medido 2026-11-04: cada frase se colgaba >20 s, dejando aplay
+# huérfanos). El mismo PCM con pw-cat termina en tiempo real (2.7 s para
+# ~2.3 s de audio).
+# BYTIA_TTS_TARGET (nombre o id de nodo) ancla la voz a un sink concreto —
+# arreglo "A" que el HANDOFF dejó aprobable el 17-oct.
+PLAY=(pw-cat --playback --raw --rate 22050 --channels 1 --format s16 -)
+if [ -n "${BYTIA_TTS_TARGET:-}" ]; then
+  PLAY=(pw-cat --playback --raw --target "$BYTIA_TTS_TARGET" \
+        --rate 22050 --channels 1 --format s16 -)
+fi
+if ! command -v pw-cat >/dev/null 2>&1; then
+  PLAY=(aplay -q -f S16_LE -r 22050 -c 1)
+fi
+
+# Watchdog: aplay/pw-cat se quedan colgados en futex_wait escribiendo al sink
+# Bluetooth cuando el transporte deja de consumir. El padre muere y el
+# reproductor queda huérfano para siempre (bug medido 2026-11-04: 5 aplay
+# huérfanos en 10 min, SIGTERM los mata). Timeout ~8 chars/s con x2 de margen
+# y SIGKILL de reserva. bytia-audio-reaper.timer recoge los que aun así
+# queden sin padre.
+WATCHDOG=$(( 10 + ${#text} / 8 ))
+[ "$WATCHDOG" -lt 20 ] && WATCHDOG=20
+[ "$WATCHDOG" -gt 300 ] && WATCHDOG=300
+# Cabecera de silencio (0,6 s): el sink HDMI/BT tarda en despertar y se come
+# la primera palabra si el PCM empieza inmediatamente.
+{ head -c 26460 /dev/zero
+  if [ -S "$SOCK" ]; then
+    python3 - "$text" <<'PY' || printf '%s' "$text" | piper --model es_AR-daniela-high --length-scale 1.08 --data-dir "$HOME/.local/share/piper-voices" --output-raw
+import socket, json, sys, os
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.settimeout(20)
+s.connect(os.path.expanduser("~/.local/state/bytia-ttsd.sock"))
+s.sendall(json.dumps({"text": sys.argv[1], "length_scale": 1.08}).encode() + b"\n")
+while True:
+    part = s.recv(65536)
+    if not part:
+        break
+    sys.stdout.buffer.write(part)
+s.close()
+PY
+  else
+    printf '%s' "$text" | piper --model es_AR-daniela-high --length-scale 1.08 \
+        --data-dir "$HOME/.local/share/piper-voices" --output-raw
+  fi
+} | timeout -k 3 "$WATCHDOG" "${PLAY[@]}" 2>/dev/null

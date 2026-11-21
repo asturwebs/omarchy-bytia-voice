@@ -1,0 +1,142 @@
+#!/usr/bin/env python3
+"""bytia-speak-notifications — BytIA lee en voz alta las notificaciones del escritorio.
+
+Lanza `dbus-monitor` (modo monitor de D-Bus, lo único que puede ver llamadas
+Notify ajenas) y parsea cada org.freedesktop.Notifications.Notify, sintetizándolo
+con `bytia-tts` (piper es_AR-daniela-high, 100% local). Daniela es SOLO el motor
+de voz; la voz/agenda es de BytIA.
+
+Excluye apps que ya hablan solas:
+- "bytia": el wrapper bytia-voice notifica CADA respuesta con
+  `notify-send -a "BytIA"` (bytia-voice:21,71) justo tras el streaming de
+  Piper — sin excluirlo, la respuesta se oye 2× (y el arranque del lector
+  solapa con la última frase y se come palabras).
+- "oma": las notificaciones del CLI upstream (feedback.py usa -a OMA).
+Cola acotada anti-spam + dedupe de textos idénticos en <10 s. Ajustable abajo.
+
+Silencio nocturno (23:00-08:00 por defecto, hora local): los avisos NO se
+encolan ni se hablan. Se comprueba al encolar y otra vez al reproducir, así
+que una cola llena a las 22:59 tampoco habla pasada la hora de corte.
+Configurable sin tocar el código: BYTIA_QUIET_START / BYTIA_QUIET_END (24h;
+iguales = silencio desactivado).
+"""
+import datetime
+import os
+import queue
+import re
+import subprocess
+import threading
+import time
+
+BYTIA_TTS = os.path.expanduser("~/.local/bin/bytia-tts")
+EXCLUDE_APPS = {"bytia-voice", "omarchy-voice", "oma", "bytia"}
+MAX_CHARS = 220
+QUEUE_MAX = 3
+QUIET_START = int(os.environ.get("BYTIA_QUIET_START", "23"))
+QUIET_END = int(os.environ.get("BYTIA_QUIET_END", "8"))
+
+MONITOR_CMD = [
+    "dbus-monitor", "--session",
+    "type='method_call',interface='org.freedesktop.Notifications',member='Notify'",
+]
+
+_q: queue.Queue = queue.Queue(maxsize=QUEUE_MAX)
+_last_text, _last_ts = None, 0.0
+
+STRING_RE = re.compile(r'string "((?:[^"\\]|\\.)*)"')
+
+
+def _unescape(s: str) -> str:
+    return (s.replace("\\n", " ").replace("\\t", " ")
+             .replace('\\\"', '"').replace("\\\\", "\\"))
+
+
+def _quiet(now: "datetime.datetime | None" = None) -> bool:
+    """True si estamos en la ventana de silencio nocturno."""
+    if QUIET_START == QUIET_END:
+        return False
+    hour = (now or datetime.datetime.now()).hour
+    if QUIET_START < QUIET_END:
+        return QUIET_START <= hour < QUIET_END
+    return hour >= QUIET_START or hour < QUIET_END
+
+
+def _clean(summary: str, body: str) -> str:
+    text = " ".join(x for x in (summary, body) if x).strip()
+    text = re.sub(r"https?://\S+", "enlace", text)
+    text = re.sub(r"[*_#~`>|]", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:MAX_CHARS]
+
+
+def _enqueue(text: str, app: str) -> None:
+    global _last_text, _last_ts
+    if app.strip().lower() in EXCLUDE_APPS:
+        return
+    if not text:
+        return
+    if _quiet():
+        print(f"[bytia] silencio nocturno, no hablo ({app}): {text}", flush=True)
+        return
+    now = time.monotonic()
+    if text == _last_text and now - _last_ts < 10:
+        return
+    _last_text, _last_ts = text, now
+    print(f"[bytia] hablando ({app}): {text}", flush=True)
+    try:
+        _q.put_nowait(text)
+    except queue.Full:
+        print("[bytia] cola llena, descartada", flush=True)
+
+
+def _worker() -> None:
+    while True:
+        text = _q.get()
+        if text is None:
+            break
+        if _quiet():
+            print("[bytia] silencio nocturno al reproducir, descartada", flush=True)
+            _q.task_done()
+            continue
+        try:
+            subprocess.run([BYTIA_TTS, "--", text], check=False, timeout=180)
+        except Exception as e:
+            print(f"[bytia] tts: {e}", flush=True)
+        _q.task_done()
+
+
+def _monitor_loop() -> None:
+    proc = subprocess.Popen(MONITOR_CMD, stdout=subprocess.PIPE,
+                            stderr=subprocess.DEVNULL, text=True)
+    capturing = False
+    strings: list[str] = []
+    done = False
+    for line in proc.stdout:
+        if line.startswith(("method call", "signal", "method return", "error")):
+            capturing = "member=Notify" in line
+            strings, done = [], False
+            continue
+        if not capturing or done:
+            continue
+        for m in STRING_RE.finditer(line):
+            strings.append(_unescape(m.group(1)))
+            if len(strings) == 4:
+                done = True
+                app, _icon, summary, body = strings
+                _enqueue(_clean(summary, body), app)
+                break
+
+
+def main() -> None:
+    threading.Thread(target=_worker, daemon=True).start()
+    threading.Thread(target=_monitor_loop, daemon=True).start()
+    if QUIET_START != QUIET_END:
+        print(f"[bytia] silencio nocturno {QUIET_START:02d}:00–{QUIET_END:02d}:00",
+              flush=True)
+    print("[bytia] escuchando notificaciones del escritorio…", flush=True)
+    while True:
+        time.sleep(60)
+
+
+if __name__ == "__main__":
+    main()

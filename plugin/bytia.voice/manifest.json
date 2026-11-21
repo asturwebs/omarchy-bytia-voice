@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "bytia.voice",
+  "name": "BytIA Voice",
+  "version": "0.1.0",
+  "author": "bytia",
+  "description": "BytIA Voice: estado y menú del asistente de voz local. Click izquierdo habla/para; click derecho abre opciones.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "VoiceIndicator.qml"
+  },
+  "barWidget": {
+    "displayName": "BytIA Voice",
+    "description": "Asistente de voz BytIA (local)",
+    "category": "Audio",
+    "allowMultiple": false
+  }
+}

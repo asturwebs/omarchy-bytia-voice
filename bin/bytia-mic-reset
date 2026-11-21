@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# bytia-mic-reset — recupera las orejas (BytIA Voice / voxtype).
+#
+# Realidad del hardware (verificada 7-oct-26): el mic real es el nodo ALSA mono
+# de la webcam Generalplus (alsa_input.usb-GENERAL_GENERAL_WEBCAM*.mono-fallback).
+# El nodo hermano V4L2 (v4l2_input.*) es un impostor que entrega ceros (16-sep-26).
+# El casco BT puede tumbar el USB de la webcam dejándolo "abierto pero sordo":
+# el nodo existe y ALSA consta "Running", pero fluyen 0 buffers. Ese wedge SOLO
+# lo arregla el replug físico (corta VBus); el software es intento gratuito.
+#
+# Qué hace:
+#   1. Localiza el nodo alsa_input.usb-GENERAL_GENERAL_WEBCAM* (pw-dump).
+#   2. Lo pone como default (idempotente) y VERIFICA flujo de audio real
+#      (pw-cat --record --raw 2 s — bytes > umbral; el silencio también fluye).
+#   3. Si falta el nodo o está sordo → recuperación software
+#      (sudo -n /usr/local/bin/bytia-usbreset-webcam: unbind/rebind + reset
+#      ioctl, NOPASSWD en /etc/sudoers.d/91-bytia-mic-reset) y re-verifica.
+#   4. Si sigue sordo → mensaje honesto: replug físico (el pin de WirePlumber
+#      auto-restaurará el default al volver).
+#
+# Detalles y diagnóstico: ~/.config/bytia-voice/HANDOFF.md (troubleshooting, 7-oct-26)
+
+set -euo pipefail
+
+RESET_BIN="/usr/local/bin/bytia-usbreset-webcam"
+RAW="/tmp/bytia-mic-reset.$$.raw"
+
+cleanup() { rm -f "$RAW"; }
+trap cleanup EXIT
+
+find_mono() {
+  pw-dump 2>/dev/null | python3 -S -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+for o in d:
+    if o.get("type") == "PipeWire:Interface:Node":
+        p = o.get("info", {}).get("props", {})
+        name = str(p.get("node.name", ""))
+        if name.startswith("alsa_input.usb-GENERAL_GENERAL_WEBCAM") and "Source" in str(p.get("media.class", "")):
+            nid = o.get("id")
+            if nid is not None:
+                print(nid)
+            break
+' 2>/dev/null || true
+}
+
+# Flujo real: 2 s a 16 kHz s16 mono = 64000 bytes si el stream fluye (aunque sea silencio).
+flow_ok() {
+  local id="$1" bytes
+  timeout -s INT 2 pw-cat --record --raw --target "$id" "$RAW" --rate 16000 --channels 1 --format s16 >/dev/null 2>&1 || true
+  bytes=$(stat -c%s "$RAW" 2>/dev/null || echo 0)
+  rm -f "$RAW"
+  (( bytes > 32000 ))
+}
+
+ensure() {
+  local id="$1"
+  wpctl set-default "$id" >/dev/null 2>&1
+  flow_ok "$id"
+}
+
+ID="$(find_mono)"
+
+if [[ -n "$ID" ]] && ensure "$ID"; then
+  echo "✅ Mic de la webcam (nodo $ID) default y CON flujo de audio. Prueba F10."
+  exit 0
+fi
+
+echo "→ Nodo ausente o sordo. Intentando recuperación software (unbind/rebind)…"
+if ! sudo -n "$RESET_BIN"; then
+  echo "❌ Recuperación software falló (¿sudoers 91-bytia-mic-reset instalado?)." >&2
+  echo "   Toca replug físico del USB de la webcam." >&2
+  exit 1
+fi
+
+for _ in $(seq 1 20); do
+  ID="$(find_mono)"
+  [[ -n "$ID" ]] && break
+  sleep 0.5
+done
+
+if [[ -n "$ID" ]] && ensure "$ID"; then
+  echo "✅ Recuperado por software: nodo $ID default y con flujo. Prueba F10."
+  exit 0
+fi
+
+echo "❌ El USB de la webcam quedó wedged a nivel hardware (reset/rebind no bastan)." >&2
+echo "   Solución: replug FÍSICO del USB. Tras él, el default se auto-restaura (pin de WirePlumber)." >&2
+exit 1

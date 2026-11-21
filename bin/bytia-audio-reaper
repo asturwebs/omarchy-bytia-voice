@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# bytia-audio-reaper — mata reproductores/grabadores de audio huérfanos o colgados.
+#
+# Origen (2026-11-04): `aplay` se queda bloqueado en futex_wait escribiendo al
+# sink Bluetooth cuando el transporte deja de consumir. El padre (bytia-tts,
+# bytia-voice, quickshell) muere por un timeout y el aplay queda reparentado a
+# systemd (PPID 1) para siempre: 5 huérfanos en 10 min ocupando sink y RAM.
+#
+# Reglas (conservadoras — solo toca lo que claramente sobra):
+#   1. aplay con PPID 1 (huérfano)          -> SIGTERM
+#   2. aplay vivo > BYTIA_REAPER_MAX_AGE s  -> SIGTERM (una notificación nunca
+#      dura eso; MAX_CHARS=220 en el lector)
+#   3. pw-record de grabaciones bytia-voice con PPID 1 -> SIGTERM
+#
+# SIGTERM basta (verificado); no se usa -9 salvo que resistan.
+# Log: journal del unit (bytia-audio-reaper.service, disparado por .timer).
+set -uo pipefail
+
+MAX_AGE="${BYTIA_REAPER_MAX_AGE:-300}"
+killed=0
+
+kill_pid() {  # kill_pid <pid> <motivo> <cmd>
+  if kill -TERM "$1" 2>/dev/null; then
+    echo "reaped: pid=$1 motivo=$2 cmd=$3"
+    killed=$((killed + 1))
+  fi
+}
+
+ppid_of() { awk '{print $4}' "/proc/$1/stat" 2>/dev/null; }
+
+check_pids() {  # <motivo-base> <patrón>
+  local pid ppid etimes motivo
+  for pid in $(pgrep "$@" 2>/dev/null); do
+    [ -r "/proc/$pid/stat" ] || continue
+    ppid="$(ppid_of "$pid")"
+    etimes="$(ps -o etimes= -p "$pid" 2>/dev/null | tr -d ' ')"
+    motivo=""
+    [ "${ppid:-0}" = "1" ] && motivo="huerfano"
+    if [ -z "$motivo" ] && [ -n "$etimes" ] && [ "$etimes" -gt "$MAX_AGE" ]; then
+      motivo="viejo(${etimes}s)"
+    fi
+    [ -n "$motivo" ] && kill_pid "$pid" "$motivo" "$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)"
+  done
+}
+
+check_pids -x aplay
+check_pids -f 'pw-record.*bytia-voice-rec'
+
+# Segunda pasada: si alguno ignoró SIGTERM, SIGKILL.
+sleep 1
+for pid in $(pgrep -x aplay 2>/dev/null); do
+  ppid="$(ppid_of "$pid")"
+  etimes="$(ps -o etimes= -p "$pid" 2>/dev/null | tr -d ' ')"
+  if [ "${ppid:-0}" = "1" ] || { [ -n "$etimes" ] && [ "$etimes" -gt "$MAX_AGE" ]; }; then
+    kill -KILL "$pid" 2>/dev/null && echo "reaped(-9): pid=$pid"
+  fi
+done
+
+exit 0

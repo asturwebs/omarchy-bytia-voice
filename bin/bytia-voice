@@ -1,0 +1,269 @@
+#!/usr/bin/env bash
+# bytia-voice — cerebro de voz local de BytIA (sin OpenAI).
+#
+# Toggle walkie-talkie: start graba el micro (PipeWire), stop para la
+# grabación, transcribe con voxtype (Parakeet local), planifica con el
+# say de omarchy-voice (motor conmutable: Unsloth local / Ollama / Z.ai) y
+# responde por notificación + voz
+# Piper femenina. Estados en ~/.cache/bytia-voice/state.json para el
+# borde pulsante de la bar y el icono.
+set -uo pipefail
+exec 2>>"${XDG_CACHE_HOME:-$HOME/.cache}/bytia-voice/trace.log"; echo "$(date +%T) called: $*" >> "${XDG_CACHE_HOME:-$HOME/.cache}/bytia-voice/trace.log"
+
+CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/bytia-voice"
+STATE="$CACHE/state.json"
+REC="/tmp/bytia-voice-rec.wav"
+# Estado compartido con el OSD de voxtype (Quickshell): escribir "recording"
+# hace aparecer el orbe/curvas abajo-centro (verificado 21-nov: el OSD lee este
+# fichero, no necesita al daemon de voxtype grabando). F10 lo usa igual que F9.
+VOXSTATE="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/voxtype/state"
+mkdir -p "$CACHE"
+
+set_state() {  # set_state <status> [text]
+  # `pid` identifica al escritor: permite saber si un estado sigue vivo sin
+  # recurrir a cronómetros. Para `listening` el vivo es pw-record (rec.pid) y
+  # este proceso muere enseguida — ver el subcomando `heal`.
+  printf '{"status": "%s", "text": "%s", "ts": %d, "pid": %d}\n' \
+    "$1" "${2:-}" "$(date +%s)" "${BASHPID:-$$}" > "$STATE"
+}
+
+notify() { notify-send -a "BytIA" -i audio-input-microphone "$@" 2>/dev/null || true; }
+osd_state() { printf '%s' "$1" > "$VOXSTATE" 2>/dev/null || true; }
+
+transcribe() {  # wav → texto (voxtype Parakeet local).
+  # Variante CPU AVX-512: la GPU (cuda-13) aborta al salir en voxtype 1.0.1
+  # ("corrupted double-linked list", teardown de onnxruntime; bug upstream) y
+  # deja un coredump de ~360 MB por cada frase.
+  # 2026-11-21: el binario se actualizó (19-nov) y CAMBIÓ su salida: ya no
+  # imprime "transcription completed" (el sed anterior devolvía VACÍO → "No
+  # entendí nada"). Ahora vuelca diagnóstico por stdout ("Loading audio file",
+  # "Audio format", "Processing N samples", líneas de log con ANSI) y el texto
+  # real al final. Se filtra por prefijo conocido y por líneas con escape ANSI.
+  local vox=/usr/lib/voxtype/voxtype-onnx-avx512
+  if [ -x "$vox" ]; then
+    "$vox" transcribe "$1" 2>/dev/null \
+      | grep -vE '^(Loading audio file|Audio format|Processing [0-9])' \
+      | grep -v $'^\x1b' \
+      | sed '/^[[:space:]]*$/d' | head -5
+  else
+    voxtype transcribe "$1" 2>/dev/null \
+      | grep -v $'^\x1b' \
+      | sed '/^[[:space:]]*$/d' | head -5
+  fi
+}
+
+clean_rec() {  # wav → recorta ceros exactos de los extremos, guarda copia y resume
+  local wav="$1" out_dir="$CACHE/recs"
+  mkdir -p "$out_dir"
+  python3 - "$wav" "$out_dir" <<'PY'
+import sys, os, wave, array, time, json, shutil
+wav, out_dir = sys.argv[1], sys.argv[2]
+try:
+    w = wave.open(wav); sr = w.getframerate(); n = w.getnframes()
+    a = array.array('h'); a.frombytes(w.readframes(n)); w.close()
+except Exception as e:
+    print(json.dumps({"status": "error", "msg": str(e)})); sys.exit(2)
+if n == 0 or len(a) == 0:
+    print(json.dumps({"status": "vacio", "dur": 0})); sys.exit(2)
+first = next((i for i, v in enumerate(a) if v), None)
+if first is None:
+    # ceros exactos en TODA la grabación = el nodo no llevaba señal. Si además
+    # dura <0.6 s es una pulsación demasiado corta (pw-record apenas arrancó),
+    # no un micrófono mudo: no alarmar.
+    shutil.copy(wav, os.path.join(out_dir, time.strftime("%Y%m%d-%H%M%S") + "-zeros.wav"))
+    status = "corto" if n / sr < 0.6 else "zeros"
+    print(json.dumps({"status": status, "dur": round(n / sr, 2)})); sys.exit(1)
+last = len(a) - next((i for i, v in enumerate(reversed(a)) if v), 0)
+head, tail = round(first / sr, 2), round((n - last) / sr, 2)
+win = int(sr * 0.5)
+gaps = [round(i / sr, 1) for i in range(0, n, win) if a[i:i + win] and not any(a[i:i + win])]
+# Recortar SOLO ceros exactos de los extremos: son ausencia de datos del SCO
+# (arranque tardío), nunca voz baja. Los huecos internos se dejan tal cual.
+if first or last < len(a):
+    with wave.open(wav, 'w') as o:
+        o.setnchannels(1); o.setsampwidth(2); o.setframerate(sr)
+        o.writeframes(a[first:last].tobytes())
+shutil.copy(wav, os.path.join(out_dir, time.strftime("%Y%m%d-%H%M%S") + ".wav"))
+old = sorted(f for f in os.listdir(out_dir) if f.endswith('.wav'))
+for f in old[:-12]:
+    os.remove(os.path.join(out_dir, f))
+print(json.dumps({"status": "ok", "dur": round((last - first) / sr, 2),
+                  "dur_raw": round(n / sr, 2), "ceros_inicio": head,
+                  "ceros_fin": tail, "n_huecos": len(gaps), "huecos": gaps[:10]}))
+PY
+}
+
+process() {  # texto → planner → voz en streaming (frase a frase) + notificación
+  local text="$1" reply="" actions="" line="" out="" frase="" spoke=0
+  set_state thinking "Procesando: $text"
+  # El planner streamea frases completas como "reply-chunk<TAB>frase":
+  # cada frase se sintetiza EN CUANTO llega — la primera suena mientras el
+  # modelo aún genera el resto. Sin chunks → fallback implícito: reply
+  # completo al final (comportamiento clásico).
+  while IFS= read -r line; do
+    out+="$line"$'\n'
+    case "$line" in
+      reply-chunk$'\t'*)
+        frase="${line#reply-chunk$'\t'}"
+        [ -z "$frase" ] && continue
+        set_state speaking "$frase"
+        timeout 30 bytia-tts -- "$frase" 2>/dev/null || true
+        spoke=1
+        ;;
+    esac
+  done < <(omarchy-voice say "$text" 2>/dev/null)
+  out=$(printf '%s' "$out" | sed 's/\x1b\[[0-9;]*m//g')
+  reply=$(printf '%s' "$out" | sed -n 's/^reply[[:space:]]\+//p' \
+    | sed 's/[[:space:]]*([0-9][0-9.]*s.*$//' | tail -1)
+  actions=$(printf '%s' "$out" | sed -n 's/^action[[:space:]]\+//p' | paste -sd' · ' -)
+  if [ -z "$reply" ]; then
+    set_state error "Sin respuesta del planner"
+    notify -u critical "BytIA" "El planner no respondió (¿key/endpoint?)"
+    sleep 3; set_state idle
+    return 1
+  fi
+  {
+    printf '\n== %s ==\n' "$(date +%H:%M:%S)"
+    printf 'TÚ: %s\n' "$text"
+    [ -n "$actions" ] && printf 'tools: %s\n' "$actions"
+    printf 'BYTIA: %s\n' "$reply"
+  } >> "${XDG_CACHE_HOME:-$HOME/.cache}/bytia-voice/transcript.log"
+  notify "BytIA" "$reply"
+  # Solo sintetiza el reply completo si NO hubo streaming (fallback).
+  if [ "$spoke" -eq 0 ]; then
+    set_state speaking "$reply"
+    # Timeout defensivo: si el TTS se cuelga, el estado no queda pegado.
+    timeout 60 bytia-tts -- "$reply" 2>/dev/null || true
+  fi
+  set_state idle
+}
+
+case "${1:-toggle}" in
+  start)
+    [ -f "$STATE" ] && grep -q listening "$STATE" && exit 0
+    rm -f "$REC"
+    # Nodo de entrada EXPLÍCITO (el que el pre-flight bytia-dict dejó elegido,
+    # o el default): sin --target, si alguien cambia el default entre el
+    # pre-flight y este punto pw-record graba de un nodo sin señal (ceros)
+    # y la transcripción vuelve vacía -> "No entendí nada" falso.
+    src="$(cat "${XDG_STATE_HOME:-$HOME/.local/state}/bytia-dict/last_source" 2>/dev/null || true)"
+    if [ -z "$src" ] || ! pactl list short sources 2>/dev/null | awk '{print $2}' | grep -qx "$src"; then
+      src="$(pactl get-default-source 2>/dev/null || true)"
+    fi
+    if [ -n "$src" ]; then
+      pw-record --rate 16000 --channels 1 --format s16 --target "$src" "$REC" 2>/dev/null &
+    else
+      pw-record --rate 16000 --channels 1 --format s16 "$REC" 2>/dev/null &
+    fi
+    echo $! > "$CACHE/rec.pid"
+    # Aviso acústico cuando el micro entrega la PRIMERA señal real: el SCO
+    # Bluetooth tarda 0,3-2,3 s en arrancar (más si había A2DP sonando) y lo
+    # que se diga antes se pierde en ceros. Medido 2026-11-04: F10 con 2,28 s
+    # de ceros al inicio = frase perdida.
+    (
+      if python3 - "$REC" <<'PY'
+import sys, time
+p = sys.argv[1]; t0 = time.time()
+while time.time() - t0 < 3.5:
+    try:
+        with open(p, 'rb') as f:
+            f.seek(44)
+            if any(f.read()):
+                sys.exit(0)
+    except (FileNotFoundError, OSError):
+        pass
+    time.sleep(0.05)
+sys.exit(1)
+PY
+      then
+        pw-play "$CACHE/beep.wav" 2>/dev/null
+      fi
+    ) &
+    osd_state recording
+    set_state listening "Escuchando…"
+    ;;
+  stop)
+    # Estado terminal GARANTIZADO: cualquier salida de este bloque (error,
+    # Ctrl+C, kill, excepción) deja el icono en idle. Sin esto quedaban
+    # estados `listening` huérfanos que la UI tenía que adivinar por tiempo.
+    trap 'set_state idle; osd_state idle' EXIT INT TERM HUP
+    [ -f "$CACHE/rec.pid" ] || exit 0
+    kill "$(cat "$CACHE/rec.pid")" 2>/dev/null
+    pkill -f "pw-record.*bytia-voice-rec" 2>/dev/null
+    rm -f "$CACHE/rec.pid"
+    pw-play "$CACHE/beep.wav" 2>/dev/null &   # feedback inmediato: "te oí"
+    sleep 0.3
+    if [ ! -s "$REC" ]; then
+      set_state idle; notify "BytIA" "No se capturó audio"; exit 0
+    fi
+    # Limpieza + diagnóstico: recorta ceros exactos de los extremos (el SCO
+    # tarda hasta 2 s en arrancar si había A2DP sonando) y guarda copia en
+    # $CACHE/recs (12 últimas). Distingue ceros de "no se entendió" — firma
+    # de mic mudo descrita en el HANDOFF de voz (2026-10-21).
+    rec_info="$(clean_rec "$REC")"; sig_rc=$?
+    echo "$(date +%T) rec: $rec_info" >> "$CACHE/trace.log"
+    if [ "$sig_rc" -eq 1 ]; then
+      if printf '%s' "$rec_info" | grep -q '"corto"'; then
+        set_state idle; notify "BytIA" "Pulsación demasiado corta — mantén F10 mientras hablas"; exit 0
+      fi
+      set_state idle; notify -u critical "BytIA" "El micrófono no entregó señal (ceros) en toda la grabación. Revisa el perfil Bluetooth y el micro."; exit 0
+    fi
+    if [ "$sig_rc" -eq 2 ]; then
+      set_state idle; notify "BytIA" "No se capturó audio"; exit 0
+    fi
+    text=$(transcribe "$REC")
+    if [ -z "$text" ]; then
+      set_state idle; notify "BytIA" "No entendí nada"; exit 0
+    fi
+    process "$text"
+    ;;
+  toggle)
+    if [ -f "$CACHE/rec.pid" ] && kill -0 "$(cat "$CACHE/rec.pid")" 2>/dev/null; then
+      "$0" stop
+    else
+      "$0" start
+    fi
+    ;;
+  cancel)
+    [ -f "$CACHE/rec.pid" ] && kill "$(cat "$CACHE/rec.pid")" 2>/dev/null
+    pkill -f "pw-record.*bytia-voice-rec" 2>/dev/null
+    rm -f "$CACHE/rec.pid" "$REC"
+    pkill -f "aplay" 2>/dev/null
+    set_state idle
+    ;;
+  say)  # texto directo sin micro (test / integración)
+    shift; process "$*"
+    ;;
+  forget)  # borra la memoria conversacional del planner
+    rm -f "${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-voice/planner-history.json"
+    notify "BytIA" "Memoria de conversación borrada"
+    ;;
+  log)  # transcript en vivo (Ctrl+C para salir)
+    exec tail -n 40 -f "${XDG_CACHE_HOME:-$HOME/.cache}/bytia-voice/transcript.log"
+    ;;
+  state)
+    cat "$STATE" 2>/dev/null || printf '{"status": "idle"}\n'
+    ;;
+  heal)  # cura estados huérfanos por liveness del proceso real, no por tiempo
+    [ -f "$STATE" ] || exit 0
+    st=$(sed -n 's/.*"status": *"\([^"]*\)".*/\1/p' "$STATE")
+    [ -n "$st" ] || exit 0
+    [ "$st" = "idle" ] && exit 0
+    if [ "$st" = "listening" ]; then
+      # Durante la grabación vive pw-record, no el proceso que escribió el estado.
+      if [ -f "$CACHE/rec.pid" ] && kill -0 "$(cat "$CACHE/rec.pid")" 2>/dev/null; then
+        exit 0
+      fi
+      pkill -f "pw-record.*bytia-voice-rec" 2>/dev/null && exit 0
+    else
+      pid=$(sed -n 's/.*"pid": *\([0-9]*\).*/\1/p' "$STATE")
+      [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && exit 0
+    fi
+    echo "$(date +%T) heal: '$st' huérfano → idle" >> "$CACHE/trace.log"
+    set_state idle
+    ;;
+  *)
+    echo "uso: bytia-voice [start|stop|toggle|cancel|say \"texto\"|state|heal|log]" >&2
+    exit 2
+    ;;
+esac

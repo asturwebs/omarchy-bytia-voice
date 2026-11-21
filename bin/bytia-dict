@@ -1,0 +1,289 @@
+#!/usr/bin/env bash
+# bytia-dict — dictado (voxtype) con el micrófono correcto, siempre.
+#
+# Historia (2026-10-21): F9 grababa silencio y devolvía "" o "Thank you." porque
+# voxtype abre `device = "default"` SIN validar nada: si el default apunta a un
+# nodo muerto (micro BT con la tarjeta en A2DP, source muteado, webcam wedgeada),
+# graba ceros. Este wrapper elige un micro que de verdad capte.
+#
+# Prioridad:
+#   1. Auricular Bluetooth conectado -> cambia la tarjeta a perfil HFP
+#      (headset-head-unit; imprescindible: A2DP no tiene micrófono), espera el
+#      nodo de entrada y lo desmutea. Al terminar, devuelve A2DP solo.
+#   2. Resto de micrófonos: el default si es usable, luego cualquier no-BT vivo
+#      (con prueba de liveness real: alguna muestra != 0; un micro real siempre
+#      tiene ruido de fondo, los ceros exactos son un micro sordo).
+#   3. Si no hay ninguno vivo: NO graba y avisa (mejor que devolver basura).
+#
+# Uso: bytia-dict start | stop | toggle | mic | restore | status
+# Log: ~/.local/state/bytia-dict/dict.log
+
+set -uo pipefail
+
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/bytia-dict"
+LOG="$STATE_DIR/dict.log"
+CACHE="$STATE_DIR/last_source"
+BT_CARD_FILE="$STATE_DIR/bt_card"
+PREV_SRC_FILE="$STATE_DIR/prev_source"
+PREV_PROFILE_FILE="$STATE_DIR/prev_profile"
+PROBE="$STATE_DIR/probe.wav"
+RESTORE_DELAY="${BYTIA_DICT_RESTORE_DELAY:-6}"
+mkdir -p "$STATE_DIR"
+
+log() { printf '%s %s\n' "$(date -Is)" "$*" >>"$LOG"; }
+if [ -f "$LOG" ] && [ "$(stat -c%s "$LOG")" -gt 200000 ]; then
+  tail -n 500 "$LOG" >"$LOG.tmp" && mv "$LOG.tmp" "$LOG"
+fi
+
+sources() { pactl list short sources 2>/dev/null | awk '$3=="PipeWire"{print $2}' | grep -v '\.monitor$'; }
+muted()   { pactl get-source-mute "$1" 2>/dev/null | grep -q 'Mute: yes'; }
+
+profile_of() {
+  pactl list cards 2>/dev/null | awk -v c="$1" '
+    $0 ~ "Name: "c {f=1}
+    f && /Active Profile:/ {print $3; exit}'
+}
+profile_available() {
+  pactl list cards 2>/dev/null | awk -v c="$1" -v p="$2" '
+    $0 ~ "Name: "c {f=1}
+    f && /^\t\t[a-z0-9-]+:/ && index($0, p":") {print; exit}' | grep -q 'available: yes'
+}
+card_connected() {
+  local mac="$1"
+  pactl list cards 2>/dev/null | grep -q "Name: bluez_card.${mac//:/_}"
+}
+
+# --- 1) Auricular BT: cambiar a HFP y devolver el nodo ------------------------
+bt_hfp_source() {
+  local card mac node t0
+  for card in $(pactl list short cards 2>/dev/null | awk '/bluez_card/{print $2}'); do
+    mac="${card#bluez_card.}"; mac="${mac//_/:}"
+    node="bluez_input.${mac}"
+    card_connected "$mac" || continue
+    if profile_available "$card" "headset-head-unit"; then
+      local prev_profile
+      prev_profile="$(profile_of "$card")"
+      printf '%s\n' "$prev_profile" >"$PREV_PROFILE_FILE"
+      # Si YA está en HFP no se toca nada -> el transporte SCO puede estar
+      # muerto (firma: el nodo bluez_input existe pero entrega ceros, con
+      # "Failure in Bluetooth audio transport" en el journal). Un ciclo
+      # off -> HFP reabre el transporte de verdad (medido 2026-11-04:
+      # A2DP/HFP-muerto = 0.55 s de ceros; tras ciclo = 6 s con señal).
+      if [ "$prev_profile" = "headset-head-unit" ] || [ "$prev_profile" = "headset-head-unit-cvsd" ]; then
+        log "BT ya en HFP: reabriendo transporte SCO"
+        pactl set-card-profile "$card" off 2>/dev/null
+        sleep 0.5
+      fi
+      t0=$(date +%s%N)
+      pactl set-card-profile "$card" headset-head-unit 2>/dev/null \
+        || pactl set-card-profile "$card" headset-head-unit-cvsd 2>/dev/null
+      for _ in $(seq 1 25); do
+        sources | grep -qx "$node" && break
+        sleep 0.1
+      done
+      if sources | grep -qx "$node"; then
+        muted "$node" && { pactl set-source-mute "$node" 0 2>/dev/null; log "desmuteado: $node"; }
+        printf '%s\n' "$card" >"$BT_CARD_FILE"
+        log "BT->HFP en $(( ($(date +%s%N)-t0)/1000000 )) ms ($card, antes: $prev_profile)"
+        echo "$node"; return 0
+      fi
+      log "BT: el nodo $node no apareció tras cambiar de perfil ($card)"
+    else
+      log "BT: $card no ofrece perfil HFP disponible"
+    fi
+  done
+  return 1
+}
+
+# --- liveness para micrófonos no-BT ------------------------------------------
+alive() {
+  local name="$1"
+  rm -f "$PROBE"
+  timeout -s INT 1 pw-record --target "$name" --rate 16000 --channels 1 --format s16 "$PROBE" >/dev/null 2>&1
+  [ -s "$PROBE" ] || return 1
+  python3 - "$PROBE" <<'PY'
+import sys, wave, array
+try:
+    w = wave.open(sys.argv[1]); a = array.array('h'); a.frombytes(w.readframes(w.getnframes()))
+except Exception:
+    sys.exit(1)
+sys.exit(0 if any(a) else 1)
+PY
+}
+
+pick_nonbt() {
+  local def cand last
+  def="$(pactl get-default-source 2>/dev/null)"
+  last="$(cat "$CACHE" 2>/dev/null || echo '')"
+  local -a cands=()
+  for cand in $(sources); do
+    case "$cand" in bluez_input.*) continue ;; esac
+    [ "$cand" = "$def" ] && cands=("$cand" "${cands[@]}") || cands+=("$cand")
+  done
+  for cand in "${cands[@]}"; do
+    muted "$cand" && { pactl set-source-mute "$cand" 0 2>/dev/null; log "desmuteado: $cand"; }
+    [ "$cand" = "$last" ] && { echo "$cand"; return 0; }
+    if alive "$cand"; then echo "$cand"; return 0; fi
+    log "descartado por sordo: $cand"
+  done
+  return 1
+}
+
+# --- señal real (RMS) para decidir BT vs micro de mesa -----------------------
+# alive() solo detecta ceros exactos; un micro BT con el transporte flojo da
+# "algo" (RMS ~44) pero es inservible para dictar. Aquí medimos nivel real.
+rms() {
+  local name="$1" f="$STATE_DIR/rms.wav"
+  rm -f "$f"
+  timeout -s INT 1 pw-record --target "$name" --rate 16000 --channels 1 --format s16 "$f" >/dev/null 2>&1
+  python3 - "$f" <<'PY'
+import sys, wave, array, math
+try:
+    w = wave.open(sys.argv[1]); a = array.array('h'); a.frombytes(w.readframes(w.getnframes()))
+except Exception:
+    print(0); sys.exit(0)
+print(int(math.sqrt(sum(x*x for x in a) / len(a))) if a else 0)
+PY
+}
+
+# Regla (2026-11-21, decisión del Socio) — estándar del sistema, sin capas:
+#   El micro es EL DEFAULT DEL SISTEMA (el que elija en el audio de Omarchy /
+#   wpctl / pactl). bytia-dict NO conmuta de micro por su cuenta:
+#     * si el default es el casco BT, se pone la tarjeta en HFP (obligatorio:
+#       A2DP no tiene micrófono) y se usa — no se cambia la elección;
+#     * si el nodo del default no existe, se recurre al fallback vivo no-BT
+#       (evitar grabar ceros), pero NUNCA se sustituye un mic que sí existe.
+pick_source() {
+  local node
+  node="$(pactl get-default-source 2>/dev/null)"
+  if [ -z "$node" ] || ! sources | grep -qx "$node"; then
+    log "el default ($node) no existe como nodo; fallback a un micro vivo"
+    node="$(pick_nonbt)" && { echo "$node"; return 0; }
+    return 1
+  fi
+  case "$node" in
+    bluez_input.*)
+      bt_hfp_source >/dev/null 2>&1 || log "BT por defecto pero HFP no disponible: $node"
+      ;;
+  esac
+  muted "$node" && { pactl set-source-mute "$node" 0 2>/dev/null; log "desmuteado: $node"; }
+  echo "$node"; return 0
+}
+
+apply() {
+  # NO se toca el default de entrada ni su metadata (2026-11-21): el micro lo
+  # decide el Socio en el audio del sistema. Escribir aquí `default.audio.source`
+  # (pw-metadata) pisaba su elección — soundcore→webcam en cada dictado — porque
+  # el metadata de PipeWire tiene prioridad sobre pactl/WirePlumber. Solo se
+  # cachea el nodo para que bytia-voice grabe con --target explícito.
+  printf '%s\n' "$1" >"$CACHE"
+}
+
+is_recording() {
+  [ "$(voxtype status 2>/dev/null | head -1)" != "idle" ] && return 0
+  pgrep -f 'pw-record.*bytia-voice-rec' >/dev/null 2>&1 && return 0
+  return 1
+}
+
+restore_output_profile() {
+  local card prev_profile prev_src busy_ts
+  # Restore de un ciclo anterior que llega durante un dictado nuevo: abortar
+  # en vez de devolver A2DP (dejaría al dictado en curso sin micrófono).
+  busy_ts="$(cat "$STATE_DIR/busy" 2>/dev/null || echo 0)"
+  if [ "$(( $(date +%s) - ${busy_ts:-0} ))" -lt 20 ]; then
+    log "restore abortado: start reciente ($(( $(date +%s) - ${busy_ts:-0} ))s)"
+    return 0
+  fi
+  is_recording && return 0
+  card="$(cat "$BT_CARD_FILE" 2>/dev/null || echo '')"
+  prev_profile="$(cat "$PREV_PROFILE_FILE" 2>/dev/null || echo '')"
+  # Solo un perfil de SALIDA A2DP es un destino válido para devolver. Si el
+  # ciclo anterior pilló la tarjeta en `off` (o en HFP por un fallo), volver
+  # a eso deja al usuario sin audio y sin pista (visto 2026-11-04 09:04):
+  # normalizar a a2dp-sink.
+  case "$prev_profile" in
+    a2dp-sink*) ;;
+    *) prev_profile="a2dp-sink" ;;
+  esac
+  if [ -n "$card" ] && [ "$(profile_of "$card")" != "$prev_profile" ]; then
+    pactl set-card-profile "$card" "$prev_profile" 2>/dev/null && log "perfil restaurado: $prev_profile ($card)"
+  fi
+  # El source de entrada NO se restaura (decisión del Socio: su elección manda;
+  # antes este bloque devolvía un PREV_SRC obsoleto y le cambiaba soundcore→webcam).
+  rm -f "$PREV_SRC_FILE" "$PREV_PROFILE_FILE" "$STATE_DIR/busy"
+}
+
+schedule_restore() {
+  cancel_restore
+  rm -f "$STATE_DIR/busy"     # fin del ciclo: el restore ya puede correr
+  is_recording && return 0
+  [ -f "$BT_CARD_FILE" ] || return 0
+  # Proceso desacoplado (setsid), NO systemd-run: el unit transitorio con
+  # nombre fijo se quedaba cargado y systemd-run fallaba en silencio ("Unit
+  # bytia-dict-restore.service was already loaded") -> el perfil se quedaba
+  # en HFP y el audio de salida en mono/teléfono. El guard `busy` ya impide
+  # que un restore viejo corte un dictado nuevo, así que no hace falta
+  # cancelarlo: si llega tarde, aborta solo.
+  setsid bash -c "sleep $RESTORE_DELAY; exec $(printf '%q' "$(readlink -f "$0")") restore" \
+    >/dev/null 2>&1 &
+}
+
+cancel_restore() {
+  # El unit transitorio se llama bytia-dict-restore.service CUANDO YA HA
+  # disparado; parar solo el .timer no lo cancela, y el restore puede caer en
+  # mitad del dictado siguiente (visto 2026-11-04 08:56:14: "perfil
+  # restaurado" y "BT->HFP" en el mismo segundo -> mic sin señal -> ceros).
+  systemctl --user stop bytia-dict-restore.timer 2>/dev/null
+  systemctl --user stop bytia-dict-restore.service 2>/dev/null
+}
+
+# Marca de "acabo de empezar": un restore programado por un ciclo anterior
+# aborta si la ve reciente, en vez de devolver A2DP a mitad de la grabación
+# nueva (elimina el ping-pong de perfiles que dejaba el mic mudo).
+mark_busy() { date +%s >"$STATE_DIR/busy"; }
+
+cmd="${1:-toggle}"
+case "$cmd" in
+  start)
+    cancel_restore; mark_busy
+    if node="$(pick_source)"; then
+      apply "$node"; log "start -> $node"
+      exec voxtype record start
+    fi
+    log "ERROR: ningún micrófono vivo"
+    notify-send -u critical "Dictado" "Ningún micrófono entrega señal. Revisa el micro." 2>/dev/null
+    exit 1
+    ;;
+  stop)
+    voxtype record stop
+    schedule_restore
+    ;;
+  toggle)
+    if [ "$(voxtype status 2>/dev/null | head -1)" = "idle" ]; then
+      cancel_restore; mark_busy
+      if node="$(pick_source)"; then
+        apply "$node"; log "toggle -> $node"; exec voxtype record start
+      fi
+      log "ERROR: ningún micrófono vivo (toggle)"; exit 1
+    else
+      voxtype record stop; schedule_restore
+    fi
+    ;;
+  mic)   # solo el pre-flight, para encadenar antes de otro grabador (bytia-voice)
+    cancel_restore; mark_busy
+    if node="$(pick_source)"; then apply "$node"; log "mic -> $node"; exit 0; fi
+    log "ERROR: ningún micrófono vivo (pre-flight)"; exit 1
+    ;;
+  restore) restore_output_profile ;;
+  schedule) schedule_restore ;;
+  reset) rm -f "$PREV_SRC_FILE" "$PREV_PROFILE_FILE" "$BT_CARD_FILE"; log "estado previo borrado" ;;
+  status)
+    echo "runtime:   $(pw-metadata -n default 2>/dev/null | grep -F "key:'default.audio.source'" | cut -d'"' -f4)"
+    echo "config:    $(pactl get-default-source 2>/dev/null)"
+    echo "elegido:   $(cat "$CACHE" 2>/dev/null || echo '-')"
+    echo "tarjeta BT: $(cat "$BT_CARD_FILE" 2>/dev/null || echo '-') perfil=$(profile_of "$(cat "$BT_CARD_FILE" 2>/dev/null || echo x)")"
+    echo "voxtype:   $(voxtype status 2>/dev/null | head -1)"
+    tail -n 5 "$LOG" 2>/dev/null
+    ;;
+  *) echo "uso: bytia-dict start|stop|toggle|mic|restore|status" >&2; exit 2 ;;
+esac
