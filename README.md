@@ -1,11 +1,16 @@
 # omarchy-voice
 
 > **BytIA fork** (`asturwebs/omarchy-bytia-voice`) — a Spanish-language, BytIA-branded
-> build for our own desktop. Changes versus upstream: the planner accepts any
-> OpenAI-compatible Chat Completions endpoint (`[openai] base_url` + `extra_body`
-> in `config.toml` — we run Z.ai GLM) and the voice persona speaks Spanish as
-> **BytIA**. Everything else — architecture, tools, policy gate, docs — is upstream
-> work, credited here in full. Same MIT license; all upstream credit belongs to
+> build for our own desktop, and since 2026-11-21 the **single source of truth for the
+> whole voice stack** of that machine (see [BytIA voice stack](#bytia-voice-stack-fork)
+> and the [stack design](docs/DESIGN-STACK.md), in Spanish).
+> Changes versus upstream: a configurable OpenAI-compatible planner (`[openai]` —
+> Z.ai GLM, Unsloth/llama.cpp, Ollama), the Spanish **BytIA** persona, persistent
+> planner memory, the `bytia-llm` brain switcher, the local F9/F10 pipeline
+> (`bin/bytia-*`: voxtype + Parakeet STT + local planner + Piper TTS), the folio
+> file-manager fix, the JEVAL router, phrase streaming and the BytIA bar widgets.
+> Everything else — architecture, tools, policy gate, docs — is upstream work,
+> credited here in full. Same MIT license; all upstream credit belongs to
 > [wombatoperator/omarchy-voice](https://github.com/wombatoperator/omarchy-voice).
 
 Voice control for the Omarchy desktop. Ask OMA to move windows, open applications,
@@ -37,6 +42,33 @@ Page text, screenshots, and tool results may also be sent when a task uses them.
 Camera inspections send a selected frame to the configured vision endpoint.
 Cloud API usage is billed to your account. Read the [security policy](SECURITY.md) before
 using an agent with your desktop and signed-in applications.
+
+## BytIA voice stack (fork)
+
+On this machine the fork also ships the local, **OpenAI-free** voice stack that drives
+the desktop from the keyboard — the main flows need no cloud key:
+
+- **F9 — dictation**: `bin/bytia-dict` → voxtype/Parakeet (local STT), typed into the
+  focused window.
+- **F10 — push-to-talk**: `bin/bytia-voice` records with PipeWire, transcribes with
+  voxtype (CPU AVX-512), plans with the local planner (`omarchy-voice say`) and answers
+  with Piper TTS (`bin/bytia-tts`).
+- **Brain switcher**: `bin/bytia-llm local|ollama|cloud [model]` rewrites `[openai]` in
+  `config.toml` and restarts the daemon (`low` reasoning effort for local Unsloth,
+  `none` for Ollama — see the design doc). A measured VRAM gate refuses models that
+  cannot fit next to Parakeet; override with `--force`.
+- **Bar/OSD plugins**: `plugin/bytia.voice` (state + menu), `plugin/voice.indicator`
+  (upstream toggle) and the upstream orb OSD.
+- **systemd user units** (7): TTS daemon, voice heal, audio reaper, bar border and
+  notification reader — versioned in `share/units/` with `%h` paths.
+
+`install.sh` links every `bin/bytia-*` **to the clone** (edit the repo → live change),
+copies the units and plugins, and enforces a hard post-install gate (`diff -rq src`)
+so an install can never silently drop local work. `uninstall.sh` mirrors it.
+Environment variable names (no values) are listed in [`share/env.example`](share/env.example).
+
+Design, invariants and open decisions: [`docs/DESIGN-STACK.md`](docs/DESIGN-STACK.md)
+(in Spanish; it is the source of truth for this stack).
 
 ## Install
 
@@ -130,6 +162,7 @@ interruptions; an [example configuration](share/echo-cancel.conf) is included.
 | [OMA Vision](docs/vision.md) | Camera setup, model switching, crop, privacy, and latency |
 | [Diagnostics](docs/diagnostics.md) | Troubleshooting, latency, and private logs |
 | [System discovery](docs/omarchy-architecture.md) | How OMA reads the installed desktop's capabilities |
+| [BytIA stack design](docs/DESIGN-STACK.md) | Fork: local F9/F10 stack, invariants and distribution (Spanish) |
 | [Security](SECURITY.md) | Data sharing, execution boundaries, private disclosure |
 | [Contributing](CONTRIBUTING.md) | Development setup, tests, and pull requests |
 
