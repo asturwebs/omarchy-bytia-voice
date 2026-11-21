@@ -16,6 +16,12 @@
 > = idéntico salvo `*.bak*`; 20/20 tests del planner). Push saneado con
 > `git-filter-repo` (email→noreply GitHub, fixture sin credenciales; 0 findings del
 > checker del repo) → `53d4db4...5afb9b9` force-with-lease, **sincronizado**.
+>
+> **Fase 2 publicada** (`b0e1978`): `install.sh` enlaza los `bin/bytia-*` al repo
+> con gate duro post-install, 7 units en `share/units/`, `env.example`, `uninstall.sh`
+> extendido y los fixes de código (bytia-llm none→low + gate VRAM I8, filtro del
+> fallback de transcribe, `rms()` fuera, `forget` en el usage). **Pendiente**:
+> reinstalar el stack real (GO aparte) y el smoke automatizado.
 
 ## 1. Alcance
 
@@ -37,16 +43,15 @@ browser, vision, tasks) para que el sync con `wombatoperator` siga siendo barato
 `vision` y `tasks` están `enabled = false` en la config viva y `realtime` no se usa
 (`engine = live`). Poda solo si upstream deja de mantenerse o el sync se encarece.
 
-`install.sh` distribuye: binarios a `~/.local/bin` (**symlink al repo** — es el
-patrón ya vivo de `bytia-llm`, verificado con `readlink`; `install.sh:60-61` aún
-enlaza a la copia y se corrige en Fase 2), plugins a `~/.config/omarchy/plugins/`,
-y **los servicios systemd user** (hoy 7 units propios viven solo en
-`~/.config/systemd/user/`, fuera del repo — se versionan en `share/units/` en
-Fase 2). Las configs viven en `~/.config/{omarchy-voice,voxtype}/`; plantilla
-real: `share/config.example.toml` (aún perfil upstream — se actualiza al perfil
-del fork en Fase 2) y `share/env.example` **por crear** (solo nombres:
-`UNSLOTH_LOCAL_API_KEY`, `ZAI_API_KEY`, `OLLAMA_LOCAL_API_KEY`, `OPENAI_API_KEY`
-opcional). Nunca secretos.
+`install.sh` distribuye: binarios a `~/.local/bin` (**symlink al repo** — patrón
+`bytia-llm`, y desde Fase 2 `install.sh:60-61` ya enlaza a `$SOURCE/bin`), plugins
+a `~/.config/omarchy/plugins/`, y **los servicios systemd user** (los 7 units
+propios, antes solo en `~/.config/systemd/user/`, están versionados en
+`share/units/` con `%h`). Las configs viven en `~/.config/{omarchy-voice,voxtype}/`;
+plantilla real: `share/config.example.toml` (aún perfil upstream — actualizarlo al
+perfil del fork queda pendiente, no bloquea) y `share/env.example` (creado; solo
+nombres: `UNSLOTH_LOCAL_API_KEY`, `ZAI_API_KEY`, `OLLAMA_LOCAL_API_KEY`,
+`OPENAI_API_KEY` opcional). Nunca secretos.
 
 ## 2. Topología (quién manda en qué)
 
@@ -101,18 +106,21 @@ OSD:           ventana: $XDG_RUNTIME_DIR/voxtype/state (escrito por bytia-voice:
 (su contenido está en `main`); `feat/jeval-router` también (no comparte historia
 con `main`: era una rama reescrita — se reconcilió por contenido).
 
-**Por hacer — Fase 2 (install.sh)**:
-- Symlinkear **todos** los `bin/bytia-*` a `~/.local/bin` **apuntando al repo**
-  (`$SOURCE/bin`), corrigiendo `install.sh:60-61` (hoy apunta a la copia instalada
-  y repuntaría el symlink vivo de `bytia-llm` sin aviso).
-- Instalar `plugin/*` y versionar los **7 units systemd propios** en `share/units/`
-  (bytia-ttsd, audio-reaper svc+timer, voice-heal svc+timer, voice-border,
-  notify-voice) con sus dependencias (venv piper por ruta absoluta, border.qml).
-- Extender `uninstall.sh` al nuevo alcance (hoy solo conoce omarchy-voice/vision).
-- `share/env.example` (solo nombres de vars) y actualizar `share/config.example.toml`
-  al perfil del fork (TwIL + engine live; hoy es el perfil upstream y no arranca).
-- Gate post-install: `diff -rq "$SOURCE/src" "$PREFIX/src"` debe dar vacío.
-- Plantilla voxtype: la gestiona el paquete del sistema — no se versiona (decisión).
+**Hecha — Fase 2 (21-nov, `b0e1978`)**:
+- `install.sh` enlaza los `bin/bytia-*` **al repo** (`$SOURCE/bin`); el symlink vivo
+  de `bytia-llm` ya no se repunta a la copia.
+- Gate **duro** post-install: `diff -rq -x __pycache__ -x '*.pyc' -x '*.bak*'` entre
+  `$SOURCE/src` y `$PREFIX/src`; si difiere, el instalador aborta.
+- `plugin/*` (incluye `bytia.voice`) y los **7 units** versionados en `share/units/`
+  con `%h`; `install.sh` los copia y hace `enable` de los que tienen `[Install]`.
+- `uninstall.sh` extendido (symlinks bytia-* solo si apuntan al repo, plugin y units).
+- `share/env.example` creado. `share/config.example.toml`: sigue el perfil upstream —
+  **pendiente** actualizarlo al perfil del fork (no bloquea la instalación).
+- Fixes de código: `bytia-llm` local `none`→`low` + gate VRAM I8 con `--force`;
+  filtro de prefijos en la rama fallback de `transcribe()`; `rms()` fuera; `forget`
+  en el usage; falso positivo de bindings corregido.
+- **Pendiente**: reinstalar el stack real (`install.sh`) — **GO aparte** — y el smoke
+  automatizado (§5.4).
 
 ## 5. Pendientes (post-GO)
 
@@ -131,7 +139,8 @@ con `main`: era una rama reescrita — se reconcilió por contenido).
 4. **Smoke automatizado**: WAV de fixtures → transcribe → planner → tool esperada
    (el bench `~/Projects/bytia-voice-bench` cubre el planner; falta el wrapper).
 5. **Upstream**: PR con el fix folio (`nautilus`→`files`).
-6. **Fixes de código de la revisión adversarial** (Fase 2, con test):
+6. **Fixes de código de la revisión adversarial — HECHOS en Fase 2** (`b0e1978`);
+   quedan como registro:
    `bytia-llm` preset `local` `none`→`low` (I2); filtro de prefijos en la rama
    fallback de `transcribe()` (I5); borrar `rms()` muerta y su comentario en
    `bytia-dict`; añadir `forget` al usage de `bytia-voice`; gate de VRAM en
