@@ -13,10 +13,10 @@ exec 2>>"${XDG_CACHE_HOME:-$HOME/.cache}/bytia-voice/trace.log"; echo "$(date +%
 CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/bytia-voice"
 STATE="$CACHE/state.json"
 REC="/tmp/bytia-voice-rec.wav"
-# Estado compartido con el OSD de voxtype (Quickshell): escribir "recording"
-# hace aparecer el orbe/curvas abajo-centro (verificado 21-nov: el OSD lee este
-# fichero, no necesita al daemon de voxtype grabando). F10 lo usa igual que F9.
-VOXSTATE="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/voxtype/state"
+# Feedback visual de F10 = el MISMO OSD rectangular de F9: bytia-voice arranca
+# la grabación del daemon de voxtype (`record start`) para que emita frames por
+# audio.sock y el OSD pinte curvas, y la cancela al parar (`record cancel`: sin
+# transcribir ni teclear nada). El WAV del planner lo sigue grabando pw-record.
 mkdir -p "$CACHE"
 
 set_state() {  # set_state <status> [text]
@@ -28,7 +28,6 @@ set_state() {  # set_state <status> [text]
 }
 
 notify() { notify-send -a "BytIA" -i audio-input-microphone "$@" 2>/dev/null || true; }
-osd_state() { printf '%s' "$1" > "$VOXSTATE" 2>/dev/null || true; }
 
 transcribe() {  # wav → texto (voxtype Parakeet local).
   # Variante CPU AVX-512: la GPU (cuda-13) aborta al salir en voxtype 1.0.1
@@ -150,6 +149,8 @@ case "${1:-toggle}" in
     # o el default): sin --target, si alguien cambia el default entre el
     # pre-flight y este punto pw-record graba de un nodo sin señal (ceros)
     # y la transcripción vuelve vacía -> "No entendí nada" falso.
+    # OSD de voxtype (la ventana de F9): el daemon graba y emite frames.
+    voxtype record start >/dev/null 2>&1 || true
     src="$(cat "${XDG_STATE_HOME:-$HOME/.local/state}/bytia-dict/last_source" 2>/dev/null || true)"
     if [ -z "$src" ] || ! pactl list short sources 2>/dev/null | awk '{print $2}' | grep -qx "$src"; then
       src="$(pactl get-default-source 2>/dev/null || true)"
@@ -183,14 +184,14 @@ PY
         pw-play "$CACHE/beep.wav" 2>/dev/null
       fi
     ) &
-    osd_state recording
     set_state listening "Escuchando…"
     ;;
   stop)
     # Estado terminal GARANTIZADO: cualquier salida de este bloque (error,
     # Ctrl+C, kill, excepción) deja el icono en idle. Sin esto quedaban
     # estados `listening` huérfanos que la UI tenía que adivinar por tiempo.
-    trap 'set_state idle; osd_state idle' EXIT INT TERM HUP
+    trap 'set_state idle' EXIT INT TERM HUP
+    voxtype record cancel >/dev/null 2>&1 || true
     [ -f "$CACHE/rec.pid" ] || exit 0
     kill "$(cat "$CACHE/rec.pid")" 2>/dev/null
     pkill -f "pw-record.*bytia-voice-rec" 2>/dev/null
@@ -233,6 +234,7 @@ PY
     pkill -f "pw-record.*bytia-voice-rec" 2>/dev/null
     rm -f "$CACHE/rec.pid" "$REC"
     pkill -f "aplay" 2>/dev/null
+    voxtype record cancel >/dev/null 2>&1 || true
     set_state idle
     ;;
   say)  # texto directo sin micro (test / integración)
@@ -264,6 +266,7 @@ PY
       [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && exit 0
     fi
     echo "$(date +%T) heal: '$st' huérfano → idle" >> "$CACHE/trace.log"
+    voxtype record cancel >/dev/null 2>&1 || true
     set_state idle
     ;;
   *)

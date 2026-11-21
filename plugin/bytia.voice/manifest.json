@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "bytia.voice",
   "name": "BytIA Voice",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": "bytia",
   "description": "BytIA Voice: estado y menú del asistente de voz local. Click izquierdo habla/para; click derecho abre opciones.",
   "kinds": [

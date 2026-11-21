@@ -124,14 +124,16 @@ con `main`: era una rama reescrita — se reconcilió por contenido).
 
 ## 5. Pendientes (post-GO)
 
-1. **Orbe con curvas** (con H3/H9 de la revisión cerrados): el `state.json` del runtime
-   **ya tiene dueño** (el daemon) y el orb exige `status ∈ {listening,thinking}` +
-   `updated` (fresh < 900 s). Productor único y fichero propio (PROPUESTO:
-   `bytia-state.json` con `updated`) o contrato con el del daemon — decisión §6(b).
-   `bytia-voice-orb-level` **lee PCM por stdin** (no «el WAV»: hay que cablear
-   `pw-record | tee`), el factor `rms/3000` es mágico (documentarlo o parametrizarlo),
-   y la mitad «oma» del anillo no tiene fuente (recortar o alimentar desde bytia-tts —
-   trabajo nuevo no previsto). `chmod +x` ya hecho (Fase 0).
+1. **Curvas en F10 — HECHO 21-nov (vía OSD de voxtype)**: F10 usa **la misma ventana
+   rectangular de F9**. `bin/bytia-voice` arranca la grabación del **daemon de voxtype**
+   (`voxtype record start`) — el daemon emite frames por `audio.sock` y el OSD pinta
+   estado + espectro — y la cancela al parar (`voxtype record cancel`: no transcribe ni
+   teclea). El WAV del planner lo sigue grabando `pw-record` en paralelo. Verificado:
+   state `recording`, frames NDJSON en `audio.sock`, capa `voxtype-osd` presente, y
+   todo apagado tras `cancel`. `plugin/voice.orb` (orbe redondo, 0.4.0 con productor
+   propio `bytia-state.json`/`bytia-level`) queda en el repo como **alternativa no
+   instalada**: se descartó para F10 porque el Socio quiere el OSD de F9 (el orbe
+   redondo aparecía encima). `bytia-voice-orb-level` queda como herramienta del fork.
 2. **Modo Live/OpenAI**: la decisión real es tecla nueva / solo widget-CLI / retirar
    (no «mantener o retirar el toggle»: el toggle como tecla no existe hoy) — §6(c).
 3. **Coexistencia de indicadores en barra**: `bytia.voice` (fork) y `voice.indicator`

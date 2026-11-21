@@ -58,6 +58,35 @@ Item {
   // Bumped by a slow timer so the staleness check below re-evaluates.
   property real nowSeconds: Date.now() / 1000
 
+  // BytIA fork: the F10 pipeline (bin/bytia-voice) is a second, independent
+  // producer — it never writes the daemon's state.json/level (one writer per
+  // file). It writes its own pair, same format, and the orb shows whichever
+  // producer reported last. Without it, F10 showed a live window with no data.
+  property string stateSource: "daemon"
+  property var lastStates: ({ daemon: null, bytia: null })
+
+  function applyState(src, parsed) {
+    lastStates[src] = parsed
+    const d = lastStates.daemon
+    const b = lastStates.bytia
+    let pick = d
+    let who = "daemon"
+    if (b && (!d || (Number(b.updated) || 0) > (Number(d.updated) || 0))) {
+      pick = b
+      who = "bytia"
+    }
+    root.stateSource = who
+    if (!pick) {
+      root.status = "stopped"
+      root.label = ""
+      root.updatedAt = 0
+      return
+    }
+    root.status = pick.status || "idle"
+    root.label = pick.text || ""
+    root.updatedAt = Number(pick.updated) || 0
+  }
+
   // A clean shutdown writes "idle" and the orb goes away. A killed daemon
   // writes nothing, leaving "listening" in the file forever — and this is a
   // fullscreen overlay, so a stuck orb sits on top of everything with no
@@ -131,21 +160,28 @@ Item {
     onFileChanged: reload()
     onLoaded: {
       try {
-        const parsed = JSON.parse(stateFile.text())
-        root.status = parsed.status || "idle"
-        root.label = parsed.text || ""
-        root.updatedAt = Number(parsed.updated) || 0
+        root.applyState("daemon", JSON.parse(stateFile.text()))
       } catch (e) {
-        root.status = "error"
-        root.label = ""
-        root.updatedAt = 0
+        root.applyState("daemon", { status: "error", updated: 0 })
       }
     }
-    onLoadFailed: {
-      root.status = "stopped"
-      root.label = ""
-      root.updatedAt = 0
+    onLoadFailed: root.applyState("daemon", null)
+  }
+
+  // F10 producer (BytIA fork): bin/bytia-voice writes this while recording.
+  FileView {
+    id: bytiaStateFile
+    path: Quickshell.env("XDG_RUNTIME_DIR") + "/omarchy-voice/bytia-state.json"
+    watchChanges: true
+    onFileChanged: reload()
+    onLoaded: {
+      try {
+        root.applyState("bytia", JSON.parse(bytiaStateFile.text()))
+      } catch (e) {
+        root.applyState("bytia", null)
+      }
     }
+    onLoadFailed: root.applyState("bytia", null)
   }
 
   // Polled rather than watched. The level file is rewritten many times a second
@@ -171,6 +207,23 @@ Item {
     }
   }
 
+  // F10 level (BytIA fork): "<you> 0.000" from bytia-voice-orb-level.
+  FileView {
+    id: bytiaLevelFile
+    path: Quickshell.env("XDG_RUNTIME_DIR") + "/omarchy-voice/bytia-level"
+    onLoaded: {
+      const parts = bytiaLevelFile.text().split(" ")
+      const you = parseFloat(parts[0])
+      const oma = parseFloat(parts[1])
+      root.youLevel = isFinite(you) ? Math.max(0, Math.min(1, you)) : 0
+      root.omaLevel = isFinite(oma) ? Math.max(0, Math.min(1, oma)) : 0
+    }
+    onLoadFailed: {
+      root.youLevel = 0
+      root.omaLevel = 0
+    }
+  }
+
   Timer {
     running: true
     interval: 30000
@@ -183,7 +236,9 @@ Item {
     interval: 60
     repeat: true
     onTriggered: {
-      levelFile.reload()
+      // Poll only the file of the producer that reported last.
+      if (root.stateSource === "bytia") bytiaLevelFile.reload()
+      else levelFile.reload()
       root.recordSample()
     }
     onRunningChanged: {

@@ -137,6 +137,8 @@ if [[ -d "$HOME/.config/omarchy" ]] && ask "install the bar widget plugin?"; the
   mkdir -p "$PLUGINDIR"
   cp -r "$SOURCE/plugin/voice.indicator" "$PLUGINDIR/"
   cp -r "$SOURCE/plugin/bytia.voice" "$PLUGINDIR/" 2>/dev/null || true
+  # voice.orb (orbe redondo) queda en el repo como alternativa experimental y NO
+  # se instala: F10 usa el mismo OSD rectangular de voxtype (ver bin/bytia-voice).
   echo "   installed to $PLUGINDIR"
   if command -v omarchy >/dev/null && omarchy bar put voice.indicator --section right >/dev/null 2>&1; then
     echo "   placed on the bar, right section"

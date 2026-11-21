@@ -57,8 +57,11 @@ the desktop from the keyboard — the main flows need no cloud key:
   `config.toml` and restarts the daemon (`low` reasoning effort for local Unsloth,
   `none` for Ollama — see the design doc). A measured VRAM gate refuses models that
   cannot fit next to Parakeet; override with `--force`.
-- **Bar/OSD plugins**: `plugin/bytia.voice` (state + menu), `plugin/voice.indicator`
-  (upstream toggle) and the upstream orb OSD.
+- **Bar/OSD plugins**: `plugin/bytia.voice` (state + menu) and `plugin/voice.indicator`
+  (upstream toggle). F10 draws the **same rectangular voxtype OSD as F9**: bytia-voice
+  drives the voxtype daemon (`record start` / `record cancel`, no transcription) so it
+  emits audio frames, and the panel meters come alive. `plugin/voice.orb` (fork, an
+  alternative round orb fed by `bytia-state.json`) ships uninstalled.
 - **systemd user units** (7): TTS daemon, voice heal, audio reaper, bar border and
   notification reader — versioned in `share/units/` with `%h` paths.
 
