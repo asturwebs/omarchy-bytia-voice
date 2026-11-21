@@ -54,14 +54,28 @@ mkdir -p "$PREFIX" "$BINDIR" "$CONFIGDIR"
 rm -rf "$PREFIX/src" "$PREFIX/bin" "$PREFIX/share" "$PREFIX/omarchy" "$PREFIX/.venv"
 cp -r "$SOURCE/src" "$SOURCE/bin" "$SOURCE/share" "$SOURCE/omarchy" "$PREFIX/"
 touch "$PREFIX/.omarchy-voice-install"
-chmod +x "$PREFIX/bin/omarchy-voice"
-chmod +x "$PREFIX/bin/omarchy-vision"
+chmod +x "$PREFIX/bin/omarchy-voice" "$PREFIX/bin/omarchy-vision"
+# Gate duro post-instalación: lo instalado debe ser idéntico al repo (excluye
+# cachés y los *.bak locales de la copia viva). Si difiere, instalar habría
+# perdido trabajo (fue el hallazgo C1/H1 de la revisión adversarial del 21-nov).
+if ! diff -rq -x __pycache__ -x '*.pyc' -x '*.bak*' "$SOURCE/src" "$PREFIX/src" >/dev/null 2>&1; then
+  warn "post-install gate FAILED: $PREFIX/src differs from $SOURCE/src"
+  diff -rq -x __pycache__ -x '*.pyc' -x '*.bak*' "$SOURCE/src" "$PREFIX/src" >&2 || true
+  exit 1
+fi
+echo "   gate: src identico al repo"
 ln -sf "$PREFIX/bin/omarchy-voice" "$BINDIR/omarchy-voice"
 ln -sf "$PREFIX/bin/omarchy-vision" "$BINDIR/omarchy-vision"
-ln -sf "$PREFIX/bin/bytia-llm" "$BINDIR/bytia-llm"
+# Los bin/bytia-* del stack se enlazan AL REPO (patrón bytia-llm; decisión del
+# Socio 2026-11-21): editar el repo cambia el comportamiento vivo sin reinstalar.
+for b in "$SOURCE"/bin/bytia-*; do
+  [[ -f $b ]] || continue
+  ln -sfn "$b" "$BINDIR/$(basename "$b")"
+done
 mkdir -p "$HOME/.local/share/applications"
 cp "$SOURCE/share/omarchy-vision.desktop" "$HOME/.local/share/applications/"
 echo "   omarchy-voice -> $BINDIR/omarchy-voice"
+echo "   bin/bytia-* -> $BINDIR (symlinks al repo)"
 
 if [[ ! -f "$CONFIGDIR/config.toml" ]]; then
   cp "$SOURCE/share/config.example.toml" "$CONFIGDIR/config.toml"
@@ -122,6 +136,7 @@ step "desktop integration"
 if [[ -d "$HOME/.config/omarchy" ]] && ask "install the bar widget plugin?"; then
   mkdir -p "$PLUGINDIR"
   cp -r "$SOURCE/plugin/voice.indicator" "$PLUGINDIR/"
+  cp -r "$SOURCE/plugin/bytia.voice" "$PLUGINDIR/" 2>/dev/null || true
   echo "   installed to $PLUGINDIR"
   if command -v omarchy >/dev/null && omarchy bar put voice.indicator --section right >/dev/null 2>&1; then
     echo "   placed on the bar, right section"
@@ -147,9 +162,19 @@ fi
 if ask "install the systemd user service (starts with your session)?"; then
   mkdir -p "$UNITDIR"
   cp "$SOURCE/share/omarchy-voice.service" "$UNITDIR/"
+  # Units propios del stack BytIA (TTS residente, heal, reaper, borde, lector).
+  # Usan %h (home del usuario): el repo es público y no lleva rutas personales.
+  for u in "$SOURCE"/share/units/*.service "$SOURCE"/share/units/*.timer; do
+    [[ -f $u ]] || continue
+    cp "$u" "$UNITDIR/"
+    if grep -q '^\[Install\]' "$u"; then
+      systemctl --user enable "$(basename "$u")" >/dev/null 2>&1 || true
+    fi
+  done
   systemctl --user daemon-reload
   systemctl --user enable omarchy-voice.service
   echo "   enabled. Start it now with: systemctl --user start omarchy-voice"
+  echo "   units BytIA: $(ls "$SOURCE"/share/units/ 2>/dev/null | tr '\n' ' ')"
 fi
 
 # --- keybindings -----------------------------------------------------------
@@ -159,7 +184,9 @@ BINDINGS="$HOME/.config/hypr/bindings.lua"
 if [[ ! -f "$BINDINGS" ]]; then
   warn "$BINDINGS does not exist. Add this by hand:"
   sed 's/^/     /' "$SOURCE/share/bindings.lua.snippet"
-elif grep -q 'omarchy-voice' "$BINDINGS"; then
+elif grep -q 'omarchy-voice listen' "$BINDINGS"; then
+  # Bind real, no la mera mención del proyecto: un comentario de bindings.lua
+  # hacía que este chequeo diera "already bound" en falso (hallazgo C8/B2).
   echo "   already bound in $BINDINGS"
 elif ask "bind SUPER + SHIFT + V in $BINDINGS?"; then
   cp "$BINDINGS" "$BINDINGS.bak-voice"

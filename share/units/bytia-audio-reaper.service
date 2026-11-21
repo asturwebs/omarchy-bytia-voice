@@ -1,0 +1,6 @@
+[Unit]
+Description=bytia-audio-reaper — limpia aplay/pw-record colgados u huérfanos
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/bytia-audio-reaper

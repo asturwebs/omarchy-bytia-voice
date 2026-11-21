@@ -1,0 +1,11 @@
+[Unit]
+Description=BytIA Voice — barrido periódico de estados huérfanos
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=30s
+AccuracySec=5s
+Unit=bytia-voice-heal.service
+
+[Install]
+WantedBy=timers.target

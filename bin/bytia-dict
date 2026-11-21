@@ -129,23 +129,6 @@ pick_nonbt() {
   return 1
 }
 
-# --- señal real (RMS) para decidir BT vs micro de mesa -----------------------
-# alive() solo detecta ceros exactos; un micro BT con el transporte flojo da
-# "algo" (RMS ~44) pero es inservible para dictar. Aquí medimos nivel real.
-rms() {
-  local name="$1" f="$STATE_DIR/rms.wav"
-  rm -f "$f"
-  timeout -s INT 1 pw-record --target "$name" --rate 16000 --channels 1 --format s16 "$f" >/dev/null 2>&1
-  python3 - "$f" <<'PY'
-import sys, wave, array, math
-try:
-    w = wave.open(sys.argv[1]); a = array.array('h'); a.frombytes(w.readframes(w.getnframes()))
-except Exception:
-    print(0); sys.exit(0)
-print(int(math.sqrt(sum(x*x for x in a) / len(a))) if a else 0)
-PY
-}
-
 # Regla (2026-11-21, decisión del Socio) — estándar del sistema, sin capas:
 #   El micro es EL DEFAULT DEL SISTEMA (el que elija en el audio de Omarchy /
 #   wpctl / pactl). bytia-dict NO conmuta de micro por su cuenta:

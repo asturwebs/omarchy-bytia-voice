@@ -1,0 +1,9 @@
+[Unit]
+Description=BytIA Voice — cura estados huérfanos del icono de la barra
+Documentation=file:%h/.local/bin/bytia-voice
+
+[Service]
+Type=oneshot
+# Liveness real (¿sigue vivo pw-record / el proceso escritor?), no cronómetro.
+# Es la red de seguridad para los kill -9, que no ejecutan traps.
+ExecStart=%h/.local/bin/bytia-voice heal

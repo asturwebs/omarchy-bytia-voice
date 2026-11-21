@@ -46,7 +46,11 @@ transcribe() {  # wav → texto (voxtype Parakeet local).
       | grep -v $'^\x1b' \
       | sed '/^[[:space:]]*$/d' | head -5
   else
+    # Mismo filtro que la rama principal (I5): si el AVX-512 desaparece o
+    # cambia de nombre en un update de voxtype, el diagnóstico no puede
+    # colarse como "texto" — fue exactamente el bug del 19-nov.
     voxtype transcribe "$1" 2>/dev/null \
+      | grep -vE '^(Loading audio file|Audio format|Processing [0-9])' \
       | grep -v $'^\x1b' \
       | sed '/^[[:space:]]*$/d' | head -5
   fi
@@ -263,7 +267,7 @@ PY
     set_state idle
     ;;
   *)
-    echo "uso: bytia-voice [start|stop|toggle|cancel|say \"texto\"|state|heal|log]" >&2
+    echo "uso: bytia-voice [start|stop|toggle|cancel|say \"texto\"|forget|state|heal|log]" >&2
     exit 2
     ;;
 esac

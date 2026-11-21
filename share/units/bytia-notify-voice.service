@@ -1,0 +1,12 @@
+[Unit]
+Description=BytIA - lee las notificaciones del escritorio (voz piper/Daniela)
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+ExecStart=/usr/bin/python3 %h/.local/bin/bytia-speak-notifications
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=graphical-session.target

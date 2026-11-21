@@ -42,3 +42,5 @@ dist/
 *.bak
 *.bak-*
 *.bak.*
+# uv.lock: artefacto de los tests con `uv run`; el proyecto no usa uv como gestor
+uv.lock

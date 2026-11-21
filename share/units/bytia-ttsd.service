@@ -1,0 +1,13 @@
+[Unit]
+Description=bytia-ttsd — daemon de voz residente (modelo piper caliente)
+After=default.target
+
+[Service]
+# Requiere piper-tts instalado con uv (`uv tool install piper-tts`), que crea
+# %h/.local/share/uv/tools/piper-tts/. Ajusta la ruta si usas otro venv.
+ExecStart=%h/.local/share/uv/tools/piper-tts/bin/python %h/.local/bin/bytia-ttsd.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

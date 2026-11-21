@@ -1,0 +1,13 @@
+[Unit]
+Description=BytIA Voice — borde pulsante de la barra
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+# Requiere border.qml en %h/.config/bytia-voice/ (config local, no versionada).
+ExecStart=/usr/bin/qs -p %h/.config/bytia-voice/border.qml
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=graphical-session.target

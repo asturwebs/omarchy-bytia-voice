@@ -1,0 +1,13 @@
+[Unit]
+Description=bytia-audio-reaper — barrido cada minuto de reproductores/grabadores colgados
+
+[Timer]
+# OnActiveSec da la primera pasada; OnUnitInactiveSec reprograma 60 s después
+# de cada ejecución (OnUnitActiveSec solo no programa nada si el servicio aún
+# no ha corrido nunca).
+OnActiveSec=60s
+OnUnitInactiveSec=60s
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

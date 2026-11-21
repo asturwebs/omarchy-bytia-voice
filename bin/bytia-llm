@@ -17,8 +17,11 @@ sea y `bytia-llm ollama <modelo>`. Requiere OLLAMA_LOCAL_API_KEY en
 
 Cambia planner_model / api_key_env / base_url en la sección [openai] de
 ~/.config/omarchy-voice/config.toml y reinicia omarchy-voice.service.
-El extra_body (reasoning_effort = "low") vale para ambos: verificado que el
-gemma-4 lo respeta (reduce el thinking y acelera la respuesta).
+El extra_body es una MATRIZ POR DESTINO (I2 del diseño del stack): `local` usa
+"low" (el modelo lo respeta y conserva las tool_calls); `ollama` usa "none"
+(mimo gasta el budget razonando con "low" — medido 2026-11-06).
+Gate de VRAM (I8): con un modelo local, avisa/bloquea si el tamaño medido no
+cabe junto a parakeet en F9 (~7 GiB). `--force` lo salta.
 Backup del config original: config.toml.bak-pre-llm-switch.
 """
 import re
@@ -40,7 +43,9 @@ PRESETS = {
         "planner_model": "TwIL-8B-Q4_K_M-balanced",
         "api_key_env": "UNSLOTH_LOCAL_API_KEY",
         "base_url": "http://127.0.0.1:8888/v1",
-        "extra_body": '{ reasoning_effort = "none" }',
+        # I2: en Unsloth local, "low" conserva las tool_calls; con "none" el
+        # modelo responde «Hecho» sin emitir ninguna (medido 2026-11-21).
+        "extra_body": '{ reasoning_effort = "low" }',
     },
     "ollama": {
         "planner_model": "mimo-planner:9b-q8",
@@ -57,6 +62,31 @@ PRESETS = {
 # Host → preset. Se compara por puerto y no por igualdad exacta para que
 # `ollama <modelo>` y variantes de host no mientan en `status`.
 _HOSTS = {"127.0.0.1:8888": "local", "127.0.0.1:11434": "ollama"}
+
+# Tabla modelo → GiB en VRAM (bench 21-nov-2026). I8: el planner debe caber
+# junto a parakeet (~740 MB en F9) — umbral conservador 7 GiB. Un modelo no
+# medido no se bloquea: se avisa (no inventar cifras), con --force para saltar.
+VRAM_KNOWN = {
+    "twil": 5.0,
+    "gemma-4-e4b": 2.5,
+    "gemma-12b": 6.7,
+    "qwen3.8-27b": 15.0,
+    "coder": 16.5,
+    "mimo-planner": 5.0,
+}
+VRAM_LIMIT_GIB = 7.0
+
+
+def check_vram(model: str) -> str | None:
+    """None si el modelo cabe en I8; si no, el motivo (texto para el aviso)."""
+    low = model.lower()
+    for key, gib in VRAM_KNOWN.items():
+        if key in low:
+            if gib > VRAM_LIMIT_GIB:
+                return (f"{model} ~{gib:.1f} GiB > I8 ({VRAM_LIMIT_GIB:.0f} GiB con "
+                        f"parakeet): F9 puede fallar por OutOfDeviceMemory")
+            return None
+    return f"{model}: tamaño no medido — I8 exige <= {VRAM_LIMIT_GIB:.0f} GiB con parakeet"
 
 
 def _openai_section(text: str) -> str:
@@ -99,7 +129,8 @@ def patch_section(text: str, values: dict) -> str:
 
 
 def main():
-    args = sys.argv[1:]
+    force = "--force" in sys.argv[1:]
+    args = [a for a in sys.argv[1:] if a != "--force"]
     if not args or args[0] not in ("local", "ollama", "cloud", "status") or len(args) > 2:
         print(__doc__)
         sys.exit(1)
@@ -125,6 +156,13 @@ def main():
     values = dict(PRESETS[target])
     if target in ("local", "ollama") and len(args) == 2:
         values["planner_model"] = args[1]
+
+    if target in ("local", "ollama") and not force:
+        risk = check_vram(values["planner_model"])
+        if risk:
+            print(f"AVISO VRAM (I8): {risk}")
+            print("  usa --force para aplicarlo igualmente")
+            sys.exit(2)
 
     if target == active and not (target in ("local", "ollama") and len(args) == 2):
         print(f"ya estás en {target} — nada que hacer")

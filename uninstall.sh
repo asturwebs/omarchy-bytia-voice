@@ -13,9 +13,25 @@ systemctl --user disable --now omarchy-voice.service 2>/dev/null || true
 "$PREFIX/bin/omarchy-vision" quit 2>/dev/null || true
 rm -f "$HOME/.config/systemd/user/omarchy-voice.service"
 systemctl --user daemon-reload 2>/dev/null || true
-rm -rf "$PREFIX" "$HOME/.config/omarchy/plugins/voice.indicator"
+rm -rf "$PREFIX" "$HOME/.config/omarchy/plugins/voice.indicator" "$HOME/.config/omarchy/plugins/bytia.voice"
 rm -f "$BINDIR/omarchy-voice"
 rm -f "$BINDIR/omarchy-vision" "$HOME/.local/share/applications/omarchy-vision.desktop"
+# bin/bytia-*: solo si el symlink apunta a ESTE repo (nunca tocar otros orígenes).
+for b in "$SOURCE"/bin/bytia-*; do
+  [[ -f $b ]] || continue
+  target="$BINDIR/$(basename "$b")"
+  if [[ -L $target && $(readlink -f "$target") == $(readlink -f "$b") ]]; then
+    rm -f "$target"
+  fi
+done
+# Units propios versionados: disable (si tiene [Install]) y borrar el fichero.
+for u in "$SOURCE"/share/units/*.service "$SOURCE"/share/units/*.timer; do
+  [[ -f $u ]] || continue
+  name="$(basename "$u")"
+  systemctl --user disable --now "$name" >/dev/null 2>&1 || true
+  rm -f "$HOME/.config/systemd/user/$name"
+done
+systemctl --user daemon-reload 2>/dev/null || true
 
 # The `omarchy voice ...` routes, if they were installed next to the omarchy
 # binary. Only these exact names, never a glob that could take omarchy's own.
