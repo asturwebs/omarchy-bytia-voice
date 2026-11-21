@@ -1614,6 +1614,17 @@ class Executor:
         if not _DISPATCH_RE.match(expr):
             return "expression must be a single hl.dsp.* call"
         method = expr.split("(", 1)[0].split(".")[-1]
+        if method == "close":
+            # A bare close() closes whatever has focus. During the 2026-11-21
+            # test it closed the user's X window while the planner believed it
+            # was closing the file manager. Only an explicit address is allowed;
+            # the model gets it from `hyprctl clients`.
+            if not re.fullmatch(
+                    r'''\s*hl\.dsp\.window\.close\(\s*\{\s*window\s*=\s*["']address:0x[0-9a-fA-F]+["']\s*\}\s*\)\s*;?\s*''',
+                    expr):
+                return ('window.close requires {"window": "address:0x…"}; a bare '
+                        'close() targets the focused window. Query hyprctl clients '
+                        'and pass the exact address.')
         if method in SHELL_DISPATCHERS and not self.config.allow_shell:
             return (f"hl.dsp.{method} is process execution; enable allow_shell "
                     "to use it, or launch apps with launch_app / omarchy_cli")
