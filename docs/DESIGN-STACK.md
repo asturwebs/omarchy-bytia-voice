@@ -1,19 +1,21 @@
 # Diseño — Stack de voz BytIA (F9 / F10 / daemon / OSD)
 
-> Estado: **propuesta de consolidación v2** (21-nov-2026). Sustituye al mosaico actual
-> de scripts sueltos en `~/.local/bin` por este repo como fuente única.
+> Estado: **propuesta de consolidación v2.1** (21-nov-2026). Sustituye al mosaico
+> actual de scripts sueltos en `~/.local/bin` por este repo como fuente única.
 > Autor: BytIA + Socio.
 >
 > **Revisión adversarial ejecutada** (21-nov, 2 motores independientes: MiMo-V2.6-Pro
-> y GLM-5.3-flash, panes herdr — ambos NO-GO v1). Esta v2 incorpora la reparación:
-> hallazgos re-verificados en disco por el autor. Las decisiones del Socio que aún no
-> tienen respuesta van marcadas **PROPUESTO** (no se implementan sin ratificación).
+> y GLM-5.3-flash, panes herdr — ambos NO-GO en v1). **Re-auditoría v2: GO con
+> condiciones en ambos motores** (1 ronda); esta v2.1 cierra todas: I7 recableado,
+> referencias §6(b), conteos 9 binarios / 7 units, gate con `*.bak*` y criterio de
+> poda del upstream. Las decisiones del Socio sin respuesta van marcadas **PROPUESTO**
+> (no se implementan sin ratificación).
 >
-> **Fase 0 ejecutada** (21-nov): `main` = estado vivo del daemon (commits `37b956f`
-> trabajo vivo + `4aa2e6e` reconciliación; gate `diff -rq` repo↔instalado vacío;
-> 20/20 tests del planner). **Push pendiente**: el hook de publicación del repo
-> público bloquea los 21 commits nunca publicados por email no privado en la
-> historia antigua (decisión del Socio: sanear historia o dejarlo local).
+> **Fase 0 ejecutada y publicada** (21-nov): `main` = estado vivo del daemon (commits
+> `3486c30` trabajo vivo + `ca93bba` reconciliación; gate `diff -rq` repo↔instalado
+> = idéntico salvo `*.bak*`; 20/20 tests del planner). Push saneado con
+> `git-filter-repo` (email→noreply GitHub, fixture sin credenciales; 0 findings del
+> checker del repo) → `53d4db4...5afb9b9` force-with-lease, **sincronizado**.
 
 ## 1. Alcance
 
@@ -30,10 +32,15 @@ pasa a ser la **fuente de verdad** de todo el stack de voz de la máquina:
 - `plugin/voice.orb`, `plugin/voice.indicator` — OSD e indicador (del upstream).
 - `src/`, `bin/omarchy-voice`, `bin/omarchy-vision` — daemon/planner (upstream + parches).
 
+**Criterio sobre el upstream**: se mantiene el paquete completo (live, realtime,
+browser, vision, tasks) para que el sync con `wombatoperator` siga siendo barato;
+`vision` y `tasks` están `enabled = false` en la config viva y `realtime` no se usa
+(`engine = live`). Poda solo si upstream deja de mantenerse o el sync se encarece.
+
 `install.sh` distribuye: binarios a `~/.local/bin` (**symlink al repo** — es el
 patrón ya vivo de `bytia-llm`, verificado con `readlink`; `install.sh:60-61` aún
 enlaza a la copia y se corrige en Fase 2), plugins a `~/.config/omarchy/plugins/`,
-y **los servicios systemd user** (hoy 8 units propios viven solo en
+y **los servicios systemd user** (hoy 7 units propios viven solo en
 `~/.config/systemd/user/`, fuera del repo — se versionan en `share/units/` en
 Fase 2). Las configs viven en `~/.config/{omarchy-voice,voxtype}/`; plantilla
 real: `share/config.example.toml` (aún perfil upstream — se actualiza al perfil
@@ -62,10 +69,14 @@ OSD:           ventana: $XDG_RUNTIME_DIR/voxtype/state (escrito por bytia-voice:
                TIENE DUEÑO (el daemon: {status,icon,class,updated}; el orb exige status
                listening/thinking y fresh = updated < 900 s). PROPUESTO: fichero propio
                (bytia-state.json con campo updated) + productor único (bytia-voice), y el nivel
-               por bytia-voice-orb-level — que hoy lee PCM por stdin, no «el WAV». Decisión §6(d).
+               por bytia-voice-orb-level — que hoy lee PCM por stdin, no «el WAV». Decisión §6(b).
 ```
 
 ## 3. Invariantes (lecciones medidas el 21-nov-2026 — no re-litigar)
+
+> Evidencia completa y fechada: `~/.config/bytia-voice/HANDOFF.md`, entradas
+> 18:4x–19:3x del 21-nov. Cada invariante nació de un fallo medido; el HANDOFF
+> es donde se cierra el litigio.
 
 | # | Invariante | Porqué (evidencia) |
 |---|---|---|
@@ -75,18 +86,18 @@ OSD:           ventana: $XDG_RUNTIME_DIR/voxtype/state (escrito por bytia-voice:
 | I4 | **Gestor de archivos = folio**: `omarchy launch files` (parche en `src/omarchy_voice/{capabilities,tools}.py`). | Nautilus no existe desde el 11-nov (folio, r7697). |
 | I5 | **La transcripción no se ancla a mensajes de log**: el wrapper filtra por formato (prefijos `Loading audio file`/`Audio format`/`Processing` + líneas con ANSI), no por la frase `transcription completed`. En bytia-voice usar la variante **CPU AVX-512** (la GPU abortaba al salir: observado en voxtype 1.0.1, coredump ~360 MB/frase; instalado hoy 1.3.0, **sin re-verificar** — re-testear GPU en cada update mayor antes de retirar el workaround). ⚠️ La **rama fallback** de `transcribe()` (sin el binario AVX-512) NO aplica ese filtro — fix en Fase 2. | El update de voxtype del 19-nov cambió la salida → `sed` viejo devolvía vacío → «No entendí nada». |
 | I6 | **OSD**: ventana por el fichero `voxtype/state` (ya integrado); curvas por `audio.sock` del daemon (solo si graba él). El orbe propio (VoiceOrb) leerá `omarchy-voice/{state.json,level}`. | El OSD de Quickshell lee state (fichero) + audio.sock (daemon). |
-| I7 | **OpenAI Live es un modo aparte** (toggle Super+Shift+V). Sin `OPENAI_API_KEY` da 401 y **no afecta a F9/F10** (100% locales). | F10 = voxtype+planner local; los 401 no tocan ese flujo. |
+| I7 | **OpenAI Live es un modo aparte, SIN tecla propia** (widget `voice.indicator` o CLI `omarchy-voice listen toggle`). **Super+Shift+V es el walkie LOCAL**, no el modo Live. Sin `OPENAI_API_KEY` da 401 y **no afecta a F9/F10** (100% locales). | F10 = voxtype+planner local; los 401 no tocan ese flujo. El binding del daemon existió (hoy solo en `bindings.lua.bak-bytia`), sustituido por el walkie local. |
 | I8 | **El planner debe caber con parakeet**: ≤ ~7 GiB en VRAM (TwIL 5 GB o gemma-12b-qat 6,7 GB). Modelos grandes (Coder 16,5 GB) rompen la transcripción GPU de F9 por `OutOfDeviceMemory`. | Medido: parakeet 740 MB no cabía con el Coder cargado. F10 transcribe por CPU igualmente. |
-| I9 | **Parches al fork — inventario completo con estado**: identidad/persona (`6d1d431`), memoria del planner (`53d4db4`), endpoints OpenAI-compatibles (`6d1d431`), `bytia-llm` (`ddde6b9`), folio (`37b956f`), y **jeval + streaming + modelo dinámico + ventana de memoria** portados en `4aa2e6e` desde `feat/jeval-router` (= estado vivo verificado md5). Tras este diseño, el repo ES la fuente; hasta que `install.sh` esté extendido (Fase 2), reinstalar con el install.sh actual **borra jeval/streaming** (hace `rm -rf` del `src/` instalado) → gate `diff -rq` obligatorio. Proponer el fix folio a upstream. | El fork es upstream + commits propios; la copia instalada iba por delante de `main` hasta la reconciliación del 21-nov. |
+| I9 | **Parches al fork — inventario completo con estado**: identidad/persona (`d4e23e0`), memoria del planner (`deabb11`), endpoints OpenAI-compatibles (`d4e23e0`), `bytia-llm` (`19c2e80`), folio (`3486c30`), y **jeval + streaming + modelo dinámico + ventana de memoria** portados en `ca93bba` desde `feat/jeval-router` (= estado vivo verificado md5; hashes post-saneo). Tras este diseño, el repo ES la fuente; hasta que `install.sh` esté extendido (Fase 2), reinstalar con el install.sh actual **borra jeval/streaming** (hace `rm -rf` del `src/` instalado) → gate `diff -rq` obligatorio. Proponer el fix folio a upstream. | El fork es upstream + commits propios; la copia instalada iba por delante de `main` hasta la reconciliación del 21-nov. |
 
 ## 4. Distribución (qué hace y qué hará install.sh)
 
-**Hecho — Fase 0, 21-nov**: `main` contiene el estado vivo (`37b956f` + `4aa2e6e`):
-8 `bin/bytia-*`, `plugin/bytia.voice`, parche folio, jeval/streaming/persona/config,
+**Hecho — Fase 0, 21-nov**: `main` contiene el estado vivo (`3486c30` + `ca93bba`):
+9 `bin/bytia-*`, `plugin/bytia.voice`, parche folio, jeval/streaming/persona/config,
 `share/config.example.toml` con `router_mode`/`router_threshold`, `.gitignore`
 (`*.bak`, `*.bak-*`, `*.bak.*`). Gate verificado: `diff -rq repo/src ↔
-~/.local/share/omarchy-voice/src` = vacío (md5 a md5 en planner/config/live/cli/
-persona/jeval) y 20/20 tests del planner. `feat/streaming` queda como rama histórica
+~/.local/share/omarchy-voice/src` = idéntico salvo los `*.bak*` locales de la copia
+(código md5 a md5 en planner/config/live/cli/persona/jeval) y 20/20 tests del planner. `feat/streaming` queda como rama histórica
 (su contenido está en `main`); `feat/jeval-router` también (no comparte historia
 con `main`: era una rama reescrita — se reconcilió por contenido).
 
@@ -94,7 +105,7 @@ con `main`: era una rama reescrita — se reconcilió por contenido).
 - Symlinkear **todos** los `bin/bytia-*` a `~/.local/bin` **apuntando al repo**
   (`$SOURCE/bin`), corrigiendo `install.sh:60-61` (hoy apunta a la copia instalada
   y repuntaría el symlink vivo de `bytia-llm` sin aviso).
-- Instalar `plugin/*` y versionar los **8 units systemd propios** en `share/units/`
+- Instalar `plugin/*` y versionar los **7 units systemd propios** en `share/units/`
   (bytia-ttsd, audio-reaper svc+timer, voice-heal svc+timer, voice-border,
   notify-voice) con sus dependencias (venv piper por ruta absoluta, border.qml).
 - Extender `uninstall.sh` al nuevo alcance (hoy solo conoce omarchy-voice/vision).
@@ -108,7 +119,7 @@ con `main`: era una rama reescrita — se reconcilió por contenido).
 1. **Orbe con curvas** (con H3/H9 de la revisión cerrados): el `state.json` del runtime
    **ya tiene dueño** (el daemon) y el orb exige `status ∈ {listening,thinking}` +
    `updated` (fresh < 900 s). Productor único y fichero propio (PROPUESTO:
-   `bytia-state.json` con `updated`) o contrato con el del daemon — decisión §6(d).
+   `bytia-state.json` con `updated`) o contrato con el del daemon — decisión §6(b).
    `bytia-voice-orb-level` **lee PCM por stdin** (no «el WAV»: hay que cablear
    `pw-record | tee`), el factor `rms/3000` es mágico (documentarlo o parametrizarlo),
    y la mitad «oma» del anillo no tiene fuente (recortar o alimentar desde bytia-tts —
@@ -124,7 +135,9 @@ con `main`: era una rama reescrita — se reconcilió por contenido).
    `bytia-llm` preset `local` `none`→`low` (I2); filtro de prefijos en la rama
    fallback de `transcribe()` (I5); borrar `rms()` muerta y su comentario en
    `bytia-dict`; añadir `forget` al usage de `bytia-voice`; gate de VRAM en
-   `bytia-llm` para I8 (tabla modelo→GiB medida); `uninstall.sh` extendido.
+   `bytia-llm` para I8 (tabla modelo→GiB medida); `uninstall.sh` extendido; corregir
+   el falso positivo de `install.sh:162` (`grep -q 'omarchy-voice'` casa con un
+   comentario de `bindings.lua`, no con un bind real).
 
 ## 6. Decisiones (Socio)
 
