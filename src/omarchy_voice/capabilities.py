@@ -285,7 +285,13 @@ ESSENTIALS = [
     # launch had failed. Advertising the route was teaching the mistake.
     ("Open the browser (no URL — see below)", "omarchy launch browser"),
     ("Open the editor",            "omarchy launch editor"),
-    ("Open the file manager",      "omarchy launch files"),
+    # folio is the file manager since r7697; its window class is "folio".
+    # Name it explicitly or the planner sees class "folio" and does not connect
+    # it to "the file manager" — opening works, closing then "cannot find" it.
+    # "launch or focus" is idempotent and returns immediately (plain
+    # "launch files" blocks while the app runs and costs a 0.5 s grace every time).
+    ("Open or focus the file manager (folio; window class 'folio')",
+                                   "omarchy launch or focus folio omarchy launch files"),
     ("Open a web app, or focus it if already open",
                                    "omarchy launch or focus webapp <window-pattern> <url>"),
     ("Open any app, or focus it if already open",
